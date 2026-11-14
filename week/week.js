@@ -2,10 +2,11 @@
 // Everything stays in this browser (and the student's own sync). Nothing is written to Canvas.
 import {
   DAYS, KINDS, KIND_LABEL, CHOOSABLE, emptyWeek, toMin, hhmm, niceTime, ymd, dayIndex, mondayOf, addDays,
-  weekEvents, paintWeekly, paintOnce, sectionGroups, groupKey, normalizeMeeting, buildIcs, timeChangeNotices,
+  weekEvents, paintWeekly, paintOnce, sectionGroups, groupKey, normalizeMeeting, buildIcs, timeChangeNotices, suggestPicks, sectionSteps, isMine, applyCanvasGroups, meetingsFromCalendar, parseScheduleIcs, addOwnMeetings,
 } from "../lib/schedule.js";
 import { ZipWriter } from "../lib/zipwrite.js";
 import { planDays, planInfo } from "../lib/planner.js";
+import { enableCollapse } from "../lib/collapse.js";
 
 const $ = (s, el = document) => el.querySelector(s);
 const h = (tag, attrs = {}, ...kids) => {
@@ -23,7 +24,7 @@ const send = (type, payload = {}) => new Promise((res, rej) => chrome.runtime.se
 let toastT = null;
 function toast(msg, ms = 4000) { const t = $("#toast"); t.textContent = msg; t.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => (t.hidden = true), ms); }
 
-const S = { week: emptyWeek(), snapshot: null, settings: {}, exams: [], monday: mondayOf(new Date()), mode: "week", drag: null, adding: null };
+const S = { week: emptyWeek(), snapshot: null, settings: {}, exams: [], monday: mondayOf(new Date()), mode: "week", drag: null, adding: null, skipSteps: new Set(), stepChoice: null };
 const ROW = 22; // pixels per half hour
 
 // ---------- data ----------
@@ -262,10 +263,76 @@ function drawSide() {
     h("p", { class: "hint", style: { margin: "0 0 8px" } }, any
       ? "Found in your syllabi and course pages. Pick your own section where a course has several, and add anything that's missing."
       : "Your AI can read your syllabi and course pages and find your lectures, sections, labs and office hours (one request for all your courses). You can also add them yourself."),
-    h("button", { class: `btn ${any ? "soft" : "primary"}`, onclick: findWithAI }, any ? "Find class times again" : "Find class times with my AI"));
+    h("div", { class: "acts" },
+      h("button", { class: `btn ${any ? "soft" : "primary"}`, onclick: () => findWithAI() }, any ? "Find class times again" : "Find class times with my AI"),
+      h("button", { class: "btn soft", title: "A calendar file (.ics) of your class schedule, from your school's registration site", onclick: importIcs }, "Import class schedule")),
+    h("p", { class: "hint", style: { margin: "8px 0 0" } }, "Import class schedule: many registration sites let you download your schedule as a calendar file (.ics). It adds every lecture, section and lab at once."));
   const list = h("div", { class: "card" }, h("h2", {}, "Your courses"),
-    cs.length ? cs.map(courseCard) : h("div", { class: "hint" }, "Open StudyPilot and connect Canvas to see your courses here."));
-  side.replaceChildren(find, studyCard(), list);
+    cs.length ? cs.map(courseCard) : h("div", { class: "hint" }, "Open CampusPilot and connect Canvas to see your courses here."));
+  const lf = S.week.lastFind;
+  const missing = (lf?.missing || []).filter((m) => courseOf(m.id) && !S.week.classes?.[m.id]?.meetings?.length);
+  if (missing.length) find.append(h("div", { class: "note warn", style: { marginTop: "8px" } },
+    h("b", {}, `No times yet for ${missing.map((m) => nameOf(m.id)).join(", ")}. `),
+    missing.some((m) => m.noText) ? `CampusPilot found nothing about meeting times in ${missing.filter((m) => m.noText).map((m) => nameOf(m.id)).join(", ")}'s syllabus or pages. ` : "",
+    missing.some((m) => m.skipped && !m.noText) ? "Your AI's reply left some out. " : "",
+    "Ask again for just these, or add the times yourself below. ",
+    h("button", { class: "linkish", onclick: () => findWithAI(missing.map((m) => m.id)) }, "Ask again for these")));
+  side.replaceChildren(...[sectionWizard(), suggestCard(), find, studyCard(), list].filter(Boolean));
+}
+
+// ---------- confirming sections, one at a time ----------
+// Every course with several section (or lab, or lecture) options gets one step: the options side by side with all their
+// meetings, what Canvas says about the student, and anything that clashes with classes already theirs. Nothing is
+// picked without the student confirming it.
+const overlaps = (a, b) => toMin(a.start) < toMin(b.end) && toMin(b.start) < toMin(a.end) && (a.date && b.date ? a.date === b.date : a.days.some((d) => b.days.includes(d)));
+function clashesFor(cid, meetings) {
+  const out = new Set();
+  for (const c of courses()) {
+    const rec = S.week.classes?.[c.id];
+    if (!rec) continue;
+    const groups = sectionGroups(rec.meetings);
+    for (const o of rec.meetings) {
+      if (o.kind === "office" || meetings.includes(o)) continue;
+      if (isMine(o, S.week.picks?.[c.id], groups) !== true) continue;
+      if (String(c.id) === String(cid) && CHOOSABLE.has(o.kind) && o.kind === meetings[0]?.kind) continue;
+      if (meetings.some((m) => overlaps(m, o))) out.add(`${nameOf(c.id)} ${o.label}`);
+    }
+  }
+  return [...out];
+}
+function sectionWizard() {
+  const all = sectionSteps(S.week, courses().map((c) => c.id));
+  const steps = all.filter((st) => !S.skipSteps.has(`${st.courseId}:${st.group}`));
+  if (!all.length) return null;
+  if (!steps.length) return h("div", { class: "card wiz" }, h("h2", {}, "Confirm your sections"),
+    h("div", { class: "hint" }, `${all.length} left that you weren't sure about. `, h("button", { class: "linkish", onclick: () => { S.skipSteps.clear(); draw(); } }, "Go through them again")));
+  const st = steps[0];
+  const rec = S.week.classes[st.courseId];
+  const kind = KIND_LABEL[st.group].toLowerCase();
+  const sug = suggestPicks(rec.meetings, rec.canvas || {})[st.group];
+  const key = `${st.courseId}:${st.group}`;
+  if (S.stepChoice?.key !== key) S.stepChoice = { key, label: sug?.label || null };
+  const confirm = h("button", { class: "btn primary small", disabled: !S.stepChoice.label, onclick: () => { const l = S.stepChoice.label; S.stepChoice = null; pickSection(st.courseId, st.group, l); } }, `This is my ${kind}`);
+  const opts = st.options.map((o) => {
+    const ms = rec.meetings.filter((m) => m.kind === st.group && (m.section || m.label) === o);
+    const clash = clashesFor(st.courseId, ms);
+    const id = `opt-${key}-${o}`.replace(/[^\w-]/g, "_");
+    return h("label", { class: "wiz-opt" + (S.stepChoice.label === o ? " on" : ""), for: id },
+      h("input", { type: "radio", name: "wiz", id, checked: S.stepChoice.label === o, onchange: () => { S.stepChoice.label = o; draw(); } }),
+      h("span", { class: "grow" },
+        h("b", {}, ms[0]?.label && ms[0].label !== o && !ms[0].label.includes(o) ? `${ms[0].label} (${o})` : ms[0]?.label || o), sug?.label === o ? h("span", { class: "tag" }, "Canvas") : null,
+        ms.map((m) => h("small", { class: "muted", style: { display: "block" } },
+          `${m.date ? new Date(`${m.date}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : m.days.map((d) => DAYS[d]).join("/")} ${niceTime(m.start)}–${niceTime(m.end)}${m.location ? ` · ${m.location}` : ""}${m.who ? ` · ${m.who}` : ""}`)),
+        clash.length ? h("small", { class: "clash" }, `Clashes with ${clash.join(", ")}`) : null));
+  });
+  return h("div", { class: "card wiz" },
+    h("h2", {}, "Confirm your sections", h("span", { class: "muted", style: { fontWeight: 600, marginLeft: "6px" } }, steps.length > 1 ? `${steps.length} left` : "last one")),
+    h("div", {}, h("b", {}, nameOf(st.courseId)), ` lists ${st.options.length} ${kind} options. Which one is yours?`),
+    sug ? h("div", { class: "hint" }, `${sug.why}, so it's selected. Check it before confirming.`) : h("div", { class: "hint" }, "Canvas doesn't say which one is yours. Check your class schedule (registrar) if you're not sure."),
+    h("div", { class: "wiz-opts", role: "radiogroup", "aria-label": `Your ${kind} for ${nameOf(st.courseId)}` }, opts),
+    h("div", { class: "acts" }, confirm,
+      h("button", { class: "btn soft small", onclick: () => { S.stepChoice = null; pickSection(st.courseId, st.group, "none"); } }, "None of these"),
+      h("button", { class: "btn ghost small", onclick: () => { S.skipSteps.add(key); S.stepChoice = null; draw(); } }, "Not sure yet")));
 }
 
 // Study time as a list too (and a form), so it works with a keyboard or screen reader as well as by dragging.
@@ -315,6 +382,8 @@ function courseCard(c) {
       opts.map((o) => { const m = rec.meetings.find((x) => (x.section || x.label) === o && x.kind === g); return h("option", { value: o, selected: picks[g] === o }, `${o}${m ? ` (${m.days.map((d) => DAYS[d]).join("/")} ${niceTime(m.start)})` : ""}`); }),
       h("option", { value: "none", selected: picks[g] === "none" }, "None of these"));
     box.append(h("div", { class: "pick" }, h("span", {}, `Your ${KIND_LABEL[g].toLowerCase()}:`), sel));
+    const sg = picks[g] == null ? suggestPicks(rec.meetings, rec.canvas || {})[g] : null;
+    if (sg) box.append(h("div", { class: "hint" }, `Canvas suggests ${sg.label}. Confirm it above.`));
   }
   // meetings, everyone's first; other sections hidden once picked
   const shown = rec.meetings.filter((m) => !CHOOSABLE.has(m.kind) || (groups[groupKey(m)]?.length || 0) < 2 || !picks[groupKey(m)] || picks[groupKey(m)] === (m.section || m.label));
@@ -359,10 +428,10 @@ function addForm(c) {
   return f;
 }
 
-// Opens the StudyPilot panel and asks it to send the request to the student's AI (the panel does the hand-off).
-function findWithAI() {
-  chrome.runtime.sendMessage({ type: "OPEN_PANEL", payload: { action: "classTimes", courseIds: courses().map((c) => c.id) } });
-  toast("StudyPilot is gathering your syllabi for your AI. Watch the StudyPilot panel; class times appear here when your AI answers.", 9000);
+// Opens the CampusPilot panel and asks it to send the request to the student's AI (the panel does the hand-off).
+function findWithAI(ids = null) {
+  chrome.runtime.sendMessage({ type: "OPEN_PANEL", payload: { action: "classTimes", courseIds: Array.isArray(ids) ? ids : courses().map((c) => c.id) } });
+  toast("CampusPilot is gathering your syllabi for your AI. Watch the CampusPilot panel; class times appear here when your AI answers.", 9000);
 }
 
 // ---------- calendar file ----------
@@ -373,10 +442,10 @@ async function downloadIcs() {
   const ends = courses().map((c) => terms()[c.id]?.end).filter(Boolean).sort();
   const ics = buildIcs(S.week, { courses: courses(), terms: terms(), deadlines, exams, from: S.monday, until: ends[ends.length - 1], tz });
   const zip = new ZipWriter();
-  await zip.add("StudyPilot calendar.ics", ics);
-  await zip.add("How to import.txt", "Open Google Calendar, Apple Calendar or Outlook and import \"StudyPilot calendar.ics\" (Google Calendar: Settings > Import & export).\nIt's a copy: if your week changes, download and import it again.\n");
+  await zip.add("CampusPilot calendar.ics", ics);
+  await zip.add("How to import.txt", "Open Google Calendar, Apple Calendar or Outlook and import \"CampusPilot calendar.ics\" (Google Calendar: Settings > Import & export).\nIt's a copy: if your week changes, download and import it again.\n");
   const url = URL.createObjectURL(zip.finish());
-  try { await chrome.downloads.download({ url, filename: "StudyPilot/StudyPilot calendar.zip", saveAs: false }); toast("Saved to Downloads › StudyPilot. Unzip it and import the .ics file into your calendar."); }
+  try { await chrome.downloads.download({ url, filename: "CampusPilot/CampusPilot calendar.zip", saveAs: false }); toast("Saved to Downloads › CampusPilot. Unzip it and import the .ics file into your calendar."); }
   finally { setTimeout(() => URL.revokeObjectURL(url), 60e3); }
 }
 
@@ -388,6 +457,22 @@ $("#office").onchange = (e) => save({ showOffice: e.target.checked });
 $("#mode-week").onclick = () => { S.mode = "week"; draw(); };
 $("#mode-once").onclick = () => { S.mode = "once"; draw(); };
 $("#ics").onclick = () => downloadIcs().catch((e) => toast(e.message));
+// Google Calendar: class times and planned study for the next two weeks, kept up to date (CampusPilot's own events only).
+if (!chrome.runtime.getManifest().oauth2?.client_id?.startsWith("YOUR_")) {
+  $("#gcal-wrap").hidden = false;
+  chrome.storage.local.get("settings").then(({ settings }) => { $("#gcal").checked = !!settings?.gcalWeekSync; });
+  $("#gcal").onchange = async (e) => {
+    const on = e.target.checked;
+    e.target.disabled = true;
+    try {
+      if (on && !(await send("GCAL_STATUS")).connected) await send("GCAL_CONNECT");
+      await send("SAVE_SETTINGS", { gcalWeekSync: on });
+      const r = await send(on ? "GCAL_PUSH_WEEK" : "GCAL_REMOVE_WEEK");
+      toast(on ? `Added ${r.count} events to Google Calendar. They update when your week or plan changes.` : `Removed ${r.count} CampusPilot events from Google Calendar.`, 7000);
+    } catch (err) { e.target.checked = !on; toast(err.message, 8000); }
+    e.target.disabled = false;
+  };
+}
 chrome.storage.local.onChanged.addListener((ch) => {
   if (ch.week && !S.drag) { S.week = { ...emptyWeek(), ...(ch.week.newValue || {}) }; draw(); }
   if (ch.snapshot) { S.snapshot = ch.snapshot.newValue; draw(); }
@@ -401,4 +486,67 @@ const channel = new BroadcastChannel("studypilot-week");
 channel.onmessage = async (e) => { if (e.data?.type === "where") { const t = await chrome.tabs.getCurrent().catch(() => null); channel.postMessage({ type: "here", tabId: t?.id ?? null }); } };
 setInterval(() => { if (!S.drag && $("#pop").hidden) drawGrid(); }, 5 * 60e3); // keep the "now" line current
 
-load().then(draw).catch((e) => { $("#grid").textContent = `Couldn't load your week: ${e.message}`; });
+enableCollapse(document.querySelector("#side"), { scope: "week" });
+load().then(draw).then(canvasSections).catch((e) => { $("#grid").textContent = `Couldn't load your week: ${e.message}`; });
+// Sections Canvas names in a group ("48210 [Jordan Lee] R 10:00AM ILP 4207") go on the calendar as yours, once a day.
+async function canvasSections({ force = false } = {}) {
+  if (!force && Date.now() - (S.week.placementsAt || 0) < 864e5) return;
+  const ids = courses().map((c) => c.id);
+  if (!ids.length) return;
+  const places = await send("PLACEMENTS", { courseIds: ids }).catch(() => null);
+  if (!places) return;
+  let week = S.week;
+  const before = JSON.stringify(week.classes || {});
+  for (const [id, p] of Object.entries(places)) week = applyCanvasGroups(week, id, p);
+  const added = JSON.stringify(week.classes || {}) !== before;
+  // Weekly class meetings on the Canvas calendar: suggested, never added without a click.
+  const evs = await send("CALENDAR_CLASS_TIMES", { courseIds: ids }).catch(() => []);
+  const sug = meetingsFromCalendar(evs);
+  const suggest = {};
+  for (const [cid, ms] of Object.entries(sug)) {
+    const have = week.classes?.[cid]?.meetings || [];
+    const keep = ms.filter((m) => !(week.suggestNo || []).includes(sugKey(cid, m)) && !have.some((x) => x.kind === m.kind && x.start === m.start && x.days.some((d) => m.days.includes(d))));
+    if (keep.length) suggest[cid] = keep;
+  }
+  await save({ ...week, suggest, placementsAt: Date.now() });
+  if (added) toast("Added your section from your Canvas course groups.");
+}
+const sugKey = (cid, m) => `${cid}|${m.kind}|${m.days.join("")}|${m.start}`;
+
+// ---------- suggestions from the Canvas calendar ----------
+function suggestCard() {
+  const all = Object.entries(S.week.suggest || {}).filter(([cid, ms]) => courseOf(cid) && ms.length);
+  if (!all.length) return null;
+  const drop = async (cid, m, add) => {
+    let week = S.week;
+    if (add) week = addOwnMeetings(week, cid, [m]);
+    const rest = { ...(week.suggest || {}) };
+    rest[cid] = (rest[cid] || []).filter((x) => x !== m && sugKey(cid, x) !== sugKey(cid, m));
+    await save({ ...week, suggest: rest, suggestNo: add ? week.suggestNo || [] : [...(week.suggestNo || []), sugKey(cid, m)] });
+    toast(add ? `Added to ${nameOf(cid)}.` : "Okay, it won't be suggested again.");
+  };
+  return h("div", { class: "card wiz" }, h("h2", {}, "On your Canvas calendar"),
+    h("div", { class: "hint" }, "These repeat every week on your Canvas calendar. Add the ones that are yours."),
+    all.flatMap(([cid, ms]) => ms.map((m) => h("div", { class: "wiz-opt" },
+      h("span", { class: "grow" }, h("b", {}, `${nameOf(cid)} · ${m.label}`),
+        h("small", { class: "muted", style: { display: "block" } }, `${m.days.map((d) => DAYS[d]).join("/")} ${niceTime(m.start)}–${niceTime(m.end)}${m.location ? ` · ${m.location}` : ""}`)),
+      h("button", { class: "btn primary small", onclick: () => drop(cid, m, true) }, "Add"),
+      h("button", { class: "btn ghost small", onclick: () => drop(cid, m, false) }, "Not mine")))));
+}
+
+// ---------- importing a class schedule (.ics from the school's registration site) ----------
+function importIcs() {
+  const input = Object.assign(document.createElement("input"), { type: "file", accept: ".ics,text/calendar" });
+  input.onchange = async () => {
+    const f = input.files?.[0];
+    if (!f) return;
+    const { byCourse, other } = parseScheduleIcs(await f.text(), courses());
+    const n = Object.values(byCourse).reduce((x, ms) => x + ms.length, 0);
+    if (!n) { toast(other.length ? `None of the classes in that file match your Canvas courses (it has ${other.slice(0, 3).join(", ")}${other.length > 3 ? "…" : ""}).` : "No classes found in that file. Download the calendar (.ics) of your class schedule from your registration site.", 9000); return; }
+    let week = S.week;
+    for (const [cid, ms] of Object.entries(byCourse)) week = addOwnMeetings(week, cid, ms);
+    await save(week);
+    toast(`Added ${n} class time${n === 1 ? "" : "s"} for ${Object.keys(byCourse).map(nameOf).join(", ")}.${other.length ? ` Not in your Canvas courses: ${other.slice(0, 3).join(", ")}${other.length > 3 ? "…" : ""}.` : ""}`, 9000);
+  };
+  input.click();
+}

@@ -1,5 +1,5 @@
 // Drawing and checking the v2 question formats inside the practice window. Everything is graded here, offline.
-import { h } from "./core.js";
+import { h, ai } from "./core.js";
 import { rich } from "../lib/rich.js";
 import { filled, shownNumber, gradeMulti, gradeMatch, gradeOrder, gradeNumeric, gradePoints, gradeSteps } from "../lib/qtypes.js";
 import { closeEnough } from "../lib/formula.js";
@@ -208,20 +208,46 @@ export function drawV2(body, q, ctx) {
       body.append(ta, check(ctx.exam ? "Next" : "Compare with the key points", () => {
         if (ctx.exam) { ctx.grade(null, { given: ui.typed || "" }); return ctx.next(); }
         ui.checked = true; ctx.redraw();
+        if (ui.typed?.trim() && ai().direct) {
+          ui.aiGrading = true; ctx.redraw();
+          aiTicks(q, ui.typed, ctx.inst).then((t) => { if (t && !ui.done) { ui.ticks = t; ui.aiTicked = true; } }).catch(() => {}).finally(() => { ui.aiGrading = false; ctx.redraw(); });
+        }
       }));
       queueMicrotask(() => ta.focus());
     } else {
       ui.ticks ||= d.points.map(() => false);
       body.append(
         ui.typed?.trim() ? h("div", { class: "rn-yours" }, h("div", { class: "meta" }, "Yours"), ui.typed) : null,
-        h("div", { class: "field" }, "Tick each key point your answer covered (in any words):"),
+        ui.aiGrading ? h("div", { class: "meta" }, "Gemini is reading your answer…") : h("div", { class: "field" }, ui.aiTicked ? "Gemini ticked the key points it found in your answer. Change any it got wrong:" : "Tick each key point your answer covered (in any words):"),
         h("div", { class: "rn-points" }, d.points.map((p, i) => h("label", { class: "rn-point" },
           h("input", { type: "checkbox", checked: ui.ticks[i], disabled: ui.done, onchange: (e) => { ui.ticks[i] = e.target.checked; } }), h("span", {}, txt(p))))),
         h("details", { class: "rn-model" }, h("summary", {}, "Model answer"), h("div", {}, txt(d.answer))));
-      if (!ui.done) body.append(check("Done", () => done(gradePoints(ui.ticks.filter(Boolean).length, d.points.length), { given: ui.typed || "" })));
+      if (!ui.done && !ui.aiGrading) body.append(check("Done", () => done(gradePoints(ui.ticks.filter(Boolean).length, d.points.length), { given: ui.typed || "" })));
       fb();
     }
   }
+}
+
+// Gemma reads a typed explanation and says which key points it covers (the student can change the ticks).
+async function aiTicks(q, typed, inst) {
+  const d = q.data;
+  const { generate } = await import("../lib/gemini.js");
+  const text = `A student answered a practice question. Decide which key points their answer covers. A point counts if the idea is there in any words; it does not count if it is missing, vague, or wrong.
+
+Question: ${filled(q.prompt, inst)}
+
+Key points:
+${d.points.map((p, i) => `${i + 1}. ${p}`).join("\n")}
+
+Student's answer:
+"""${String(typed).slice(0, 4000)}"""
+
+Reply with JSON only: {"covered":[numbers of the points covered]}`;
+  const reply = (await generate([{ role: "user", parts: [{ text }] }], { kind: "small", json: true })).text;
+  const m = String(reply).match(/\{[\s\S]*\}/);
+  if (!m) return null;
+  const nums = new Set((JSON.parse(m[0]).covered || []).map(Number));
+  return d.points.map((_, i) => nums.has(i + 1));
 }
 
 // Exam mode grades written explanations at the end, by key points.

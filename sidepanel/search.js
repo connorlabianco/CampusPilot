@@ -1,5 +1,6 @@
 // Search everything: slides (by page), lecture recordings (by time), assignments, announcements, syllabi, exams, your questions.
 import { h, $, send, state, toast, courseColor, plural, openCourse, go } from "./core.js";
+import { PLACES, matchPlaces } from "./places.js";
 import { handToAI } from "./aiflow.js";
 import { snippet, askPrompt } from "../lib/search.js";
 import { icon } from "../lib/icons.js";
@@ -23,7 +24,7 @@ export function openSearch(initial = "") {
   S.filter ||= "all";
   const cur = () => FILTERS.find((f) => f.id === S.filter) || FILTERS[0];
   if (initial) S.q = initial;
-  const input = h("input", { type: "search", placeholder: "Search slides, recordings, assignments…", "aria-label": "Search everything", value: S.q, autocomplete: "off" });
+  const input = h("input", { type: "search", placeholder: "Search your courses, or any feature…", "aria-label": "Search everything", value: S.q, autocomplete: "off" });
   const list = h("div", { class: "sr-list", role: "list", "aria-live": "polite" });
   const filters = h("div", { class: "sr-filters" });
   const courseSel = h("select", { "aria-label": "Course", onchange: (e) => { S.courseId = e.target.value ? Number(e.target.value) : null; run(); } },
@@ -41,21 +42,26 @@ export function openSearch(initial = "") {
   };
   const draw = () => {
     const shown = S.results.filter((r) => inFilter(r, cur()));
+    // Features and settings by name ("pomodoro", "dark mode", "final grade"), above what's found in your courses.
+    const places = S.filter === "all" ? matchPlaces(S.q).slice(0, 5) : [];
+    const place = (p) => h("button", { class: "sr-item sr-place", role: "listitem", onclick: () => { dlg.close(); p.run(); } },
+      h("span", { class: "sr-ico" }, icon("chevron", 16)), h("span", { class: "grow" }, h("b", {}, p.t), h("small", { class: "sr-where" }, p.s)));
     if (!S.q.trim()) {
-      list.replaceChildren(h("div", { class: "muted sr-empty" }, "Try a concept (", h("i", {}, "bootstrap"), "), a phrase in quotes (", h("i", {}, "\"null hypothesis\""), "), or a word from an announcement."));
-    } else if (!shown.length) {
+      list.replaceChildren(h("div", { class: "muted sr-empty" }, "Try a concept (", h("i", {}, "bootstrap"), "), a phrase in quotes (", h("i", {}, "\"null hypothesis\""), "), or the name of anything in CampusPilot (", h("i", {}, "timer"), ", ", h("i", {}, "dark mode"), ")."),
+        h("div", { class: "sr-head" }, "Go to"), ...PLACES.map(place));
+    } else if (!shown.length && !places.length) {
       list.replaceChildren(h("div", { class: "muted sr-empty" }, `Nothing found for “${S.q}”.`));
-    } else list.replaceChildren(...shown.map((r) => row(r)));
+    } else list.replaceChildren(...(places.length ? [h("div", { class: "sr-head" }, "Go to"), ...places.map(place), shown.length ? h("div", { class: "sr-head" }, "In your courses") : null].filter(Boolean) : []), ...shown.map((r) => row(r)));
     const st = S.stats;
-    foot.replaceChildren(
+    foot.replaceChildren(...[
       st ? h("small", { class: "hint" }, `Looked inside ${plural(st.docs, "lecture")}${st.syllabi ? `, ${plural(st.syllabi, "syllabus", "syllabi")}` : ""}, plus assignments, announcements and your questions.`) : null,
       st?.unread ? h("button", { class: "btn small soft block", onclick: readAll },
         icon("download", 14), ` Read the other ${plural(st.unread, "module item")} so search can look inside them`) : null,
-      S.results.some((r) => r.kind !== "Module") ? h("button", { class: "btn small block", onclick: ask }, icon("spark", 14), " Ask my AI using these results") : null);
+      S.results.some((r) => r.kind !== "Module") ? h("button", { class: "btn small block", onclick: ask }, icon("spark", 14), " Ask my AI using these results") : null].filter(Boolean));
   };
   const readAll = async (e) => {
     e.currentTarget.disabled = true;
-    toast("Reading your lectures. This can take a few minutes; you can keep using StudyPilot.", { ms: 7000 });
+    toast("Reading your lectures. This can take a few minutes; you can keep using CampusPilot.", { ms: 7000 });
     const ids = (state.snapshot?.courses || []).filter((c) => !(state.settings.hiddenCourses || []).includes(c.id)).map((c) => S.courseId ?? c.id);
     try { await send("LIBRARY_SYNC", { courseIds: [...new Set(ids)] }); } catch (err) { toast(err.message, { error: true, ms: 8000 }); }
     S.stats = null;
@@ -66,7 +72,7 @@ export function openSearch(initial = "") {
       if (r.kind === "Question") { dlg.close(); go("practice"); return; }
       if (r.kind === "Module" && r.courseId) { dlg.close(); openCourse(r.courseId, "lectures"); return; }
       if (r.url) window.open(r.url, "_blank");
-      else if (r.courseId) { dlg.close(); openCourse(r.courseId, r.kind === "Slides" || r.kind === "Page" || r.kind === "Video" ? "lectures" : "overview"); }
+      else if (r.courseId) { dlg.close(); openCourse(r.courseId, r.kind === "Slides" || r.kind === "Page" || r.kind === "Video" ? "lectures" : r.kind === "Assignment" ? "grades" : "lectures"); }
     };
     return h("button", { class: "sr-item", role: "listitem", onclick: open },
       h("span", { class: "sr-ico", style: `color:${courseColor(r.courseId)}` }, icon(KIND_ICON[r.kind] || "file", 16)),

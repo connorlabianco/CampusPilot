@@ -2,8 +2,9 @@
 // Runs at document_start so pages don't flash the default theme first. Never on quiz/exam/tool pages.
 (() => {
   if (/\/quizzes(\/|$)|\/assessments?\/|quiz-lti|\/external_tools\/|lockdown|respondus|proctor/i.test(location.href)) return;
-  let build = null;
-  const ready = import(chrome.runtime.getURL("lib/look.js")).then((m) => { build = m; });
+  let build = null, dark = null;
+  const ready = Promise.all([import(chrome.runtime.getURL("lib/look.js")), import(chrome.runtime.getURL("lib/darken.js"))])
+    .then(([m, d]) => { build = m; dark = d; });
 
   function apply(settings) {
     if (!build) return;
@@ -14,6 +15,8 @@
     if (!style) { style = document.createElement("style"); style.id = "sp-look"; (document.head || document.documentElement).append(style); }
     style.textContent = build.buildLookCss(look);
     document.documentElement.dataset.spTheme = look.theme;
+    // Dark themes: recolor whatever Canvas draws (keeping each color's hue); other themes put everything back.
+    if (build.isDarkTheme(look.theme)) dark.startDark(look.theme); else dark.stopDark();
     const href = build.fontLink(look);
     let link = document.getElementById("sp-look-font");
     if (href) {

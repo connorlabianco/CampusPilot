@@ -1,4 +1,4 @@
-/* Fit the ledger into StudyPilot's narrow side panel without touching grade-ledger.css. */
+/* Fit the ledger into CampusPilot's narrow side panel without touching grade-ledger.css. */
 html, body { margin: 0; background: transparent; }
 body { font-size: 14px; }
 .grade-ledger { background: transparent; }
@@ -18,3 +18,95 @@ html.compact .grade-ledger td input, html.compact .grade-ledger td select { padd
 html.compact .grade-ledger .x { padding: 4px 2px; }
 html.compact .grade-ledger tfoot td { white-space: normal; font-size: .9em; }
 html.compact .grade-ledger .row { flex-wrap: wrap; }
+
+/* Inside CampusPilot: CampusPilot's look (font, accent, rounded cards), normal numbers, and results that update as you type. */
+.grade-ledger {
+  --sans: inherit; --mono: inherit;
+  --pen: var(--sp-accent, #2f6fed); --pen-soft: color-mix(in srgb, var(--pen) 12%, transparent);
+  --paper: transparent;
+}
+body { font-family: var(--sp-font, "Nunito", system-ui, -apple-system, "Segoe UI", sans-serif); }
+.grade-ledger .sheet { border-radius: 16px !important; }
+.grade-ledger input, .grade-ledger select { border-radius: 10px; }
+.grade-ledger .btn { border-radius: 10px; }
+.grade-ledger .seg { border-radius: 10px; }
+.grade-ledger .seg button[aria-pressed="true"] { background: var(--pen); color: #fff; }
+.grade-ledger :is(.big, .mid, .work, tfoot td, .legend .wt, .legend .nd, input[type=number]) { font-variant-numeric: tabular-nums; letter-spacing: 0; }
+.grade-ledger .big { font-weight: 800; }
+.grade-ledger .grade-chip { transform: none !important; }
+.grade-ledger .bar .done { background: color-mix(in srgb, var(--ink) 75%, transparent); }
+/* Calculated as you type, so the Calculate buttons aren't needed */
+#gl-calc, #gl-f-calc { display: none !important; }
+
+/* ---------- Inside the side panel: the panel's own colors, cards and type (read from the panel, so every theme matches) ---------- */
+html.sp-panel .grade-ledger.grade-ledger {
+  --sheet: var(--p-card); --rule: var(--p-line); --ink: var(--p-ink); --muted: var(--p-muted);
+  --pen: var(--p-accent); --pen-soft: var(--p-accent-2); --field: var(--p-soft); --ok: var(--p-good);
+  font-family: var(--p-font); color: var(--ink);
+}
+html.sp-panel body { font-family: var(--p-font); }
+html.sp-panel .grade-ledger .btn.primary { color: var(--p-accent-ink, #fff) !important; }
+html.sp-panel .grade-ledger .seg button[aria-pressed="true"] { background: var(--pen); color: var(--p-accent-ink, #fff); }
+html.sp-panel .grade-ledger .sheet { border-radius: 14px !important; gap: 12px; }
+html.sp-panel .grade-ledger h2 { font-size: 1rem; font-weight: 800; }
+html.sp-panel .grade-ledger .label { font-size: .72rem; letter-spacing: .05em; }
+html.sp-panel .grade-ledger .note { font-size: max(12px, .85rem); }
+html.sp-panel .grade-ledger input, html.sp-panel .grade-ledger select { border-color: transparent; background: var(--field); }
+html.sp-panel .grade-ledger input:hover, html.sp-panel .grade-ledger select:hover { border-color: var(--rule); }
+html.sp-panel .grade-ledger td { border-bottom: 0; padding-top: 3px; padding-bottom: 3px; }
+html.sp-panel .grade-ledger th { border-bottom: 0; }
+html.sp-panel .grade-ledger tfoot td { border-top: 1px solid var(--rule); color: var(--muted); }
+html.sp-panel .grade-ledger .btn { min-height: 32px; padding: 6px 12px; }
+html.no-help .sp-help { display: none !important; }
+
+/* Your grade */
+.sp-sum .sp-top { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 10px; align-items: stretch; }
+.sp-sum .res { border: 0 !important; padding: 0; }
+.sp-sum .res.main .big { font-size: 1.85rem; line-height: 1.15; color: var(--ink); white-space: nowrap; }
+.sp-sum .res.main .grade-chip { font-size: .85rem; margin-left: 6px; border-width: 1.5px; padding: 0 8px; }
+.sp-sum .sp-need { background: var(--field); border-radius: 10px; padding: 8px 10px !important; }
+.sp-sum .sp-need .big { font-size: 1.25rem; }
+.sp-sum .sp-need .note { font-size: 12px; line-height: 1.35; }
+.sp-sum .sp-remain { border-top: 0; padding-top: 0; gap: 8px; }
+.sp-sum .sp-remain > .hdr { display: none; }
+.sp-sum .bar { height: 10px; border: 0; border-radius: 999px; }
+.sp-sum .bar span { border-right-width: 2px; }
+.sp-sum .bar .done { background: var(--pen) !important; }
+.sp-sum .bar .todo { background: color-mix(in srgb, var(--pen) 35%, var(--field)) !important; }
+.sp-sum .legend li { padding: 3px 0; border-bottom: 0; font-size: max(12px, .85rem); }
+.sp-sum .sp-range > div:last-child { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sp-sum .sp-range > div:last-child .note { margin-left: auto; }
+.sp-sum .sp-range { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; gap: 8px; border-top: 1px solid var(--rule); padding-top: 10px; }
+.sp-sum .sp-range > div { min-width: 0; }
+.sp-sum .sp-range .mid { font-size: 1rem; white-space: nowrap; }
+.sp-sum .sp-range .note { font-size: 12px; line-height: 1.3; }
+.sp-sum .sp-range .inline { flex-wrap: nowrap; gap: 4px; }
+.sp-sum .sp-range .inline span { font-size: 12px; color: var(--muted); }
+.sp-sum .sp-range #gl-assume { width: 100%; max-width: 64px; padding: 3px 6px; }
+.sp-sum .sp-work { font-size: 12px; }
+
+/* Rows tools: + Row, Target, decimals, Reset on one line */
+.sp-tools { gap: 8px !important; }
+.sp-tools label { display: inline-flex; align-items: center; gap: 4px; font-size: .85rem; color: var(--muted); }
+.grade-ledger .sp-tools :is(input, select).small { width: 64px; max-width: 64px; padding: 5px 6px; }
+.sp-tools #gl-reset { margin-left: auto; }
+
+/* Saved results */
+.sp-save { gap: 8px !important; flex-wrap: nowrap !important; }
+.sp-save input { flex: 1; min-width: 0; }
+.grade-ledger .sp-small { padding: 4px 10px !important; min-height: 28px; font-size: .8rem; }
+.grade-ledger #gl-toast:empty { display: none; }
+.grade-ledger .saved .empty { padding: 0; font-size: 12px; }
+
+/* Final exam */
+.sp-fin { display: grid !important; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px !important; }
+.grade-ledger .sp-fin label.inline { display: flex; flex-direction: column; align-items: stretch; gap: 4px; min-width: 0; flex-wrap: nowrap; }
+.sp-fin .label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sp-fin .sp-pct { display: flex; align-items: center; gap: 4px; color: var(--muted); }
+.grade-ledger .sp-fin input.small { max-width: none; width: 100%; min-width: 0; flex: 1; }
+.sp-fout { border-top: 0 !important; padding-top: 0 !important; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.sp-fout .big { font-size: 1.4rem; }
+
+.sp-sum .sp-canvas { font-size: max(12px, .85rem); color: var(--muted); margin-top: -4px; }
+.grade-ledger .sp-link { all: unset; cursor: pointer; color: var(--pen); text-decoration: underline; text-underline-offset: 2px; }
+.grade-ledger .sp-link:focus-visible { outline: 2px solid var(--pen); outline-offset: 2px; border-radius: 3px; }

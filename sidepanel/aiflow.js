@@ -5,9 +5,11 @@ import { parseQuizReply, findReplyBlock, parseWeightsReply } from "../lib/ai.js"
 import { ledgerFromCanvas } from "../lib/grades.js";
 import { toRecords, addQuestions, addQuiz } from "../lib/quiz.js";
 import { assignTopics, mergeTopics } from "../lib/topics.js";
-import { hasFillPermission, loadFiles, fillTab, pageGrab } from "../lib/autofill.js";
+import { hasFillPermission, loadFiles, fillTab, pageGrab, canFill, requestFillPermission } from "../lib/autofill.js";
+import { PROVIDERS } from "../lib/ai.js";
 import { replyProgress, redoPrompt } from "../lib/finished.js";
 import { icon } from "../lib/icons.js";
+import { engineFor, runDirect, openAnswer, directWatchText, stopDirect, rerunPending } from "./direct.js";
 
 const PENDING_KEY = "aiPending";
 export const MAX_ATTACH_BYTES = 30e6; // conservative; AI upload limits vary
@@ -18,10 +20,10 @@ async function openAI() {
   return p;
 }
 
-// Writes "StudyPilot/For your AI/<date> <title>/" with the message and files.
+// Writes "CampusPilot/For your AI/<date> <title>/" with the message and files.
 async function makeBundle(title, message, files) {
   const stamp = new Date().toISOString().slice(0, 16).replace("T", " ").replace(":", "-");
-  const folder = `StudyPilot/For your AI/${stamp} ${safeFile(title).slice(0, 60)}`;
+  const folder = `CampusPilot/For your AI/${stamp} ${safeFile(title).slice(0, 60)}`;
   const mdUrl = URL.createObjectURL(new Blob([message], { type: "text/markdown" }));
   const mdId = await download(mdUrl, `${folder}/Message for your AI.md`);
   setTimeout(() => URL.revokeObjectURL(mdUrl), 60000);
@@ -37,7 +39,28 @@ async function makeBundle(title, message, files) {
  * chat: { url, fallback } to continue an earlier chat (the one a lecture's checklist came from). `text` is then the
  *   short follow-up; if that chat no longer exists, a new chat is opened with fallback() = { text, files } instead.
  */
-export async function handToAI(text, { expect = null, meta = {}, title = "", files = [], chat = null } = {}) {
+// "Which AI do you use?", asked the first time an AI feature is used (not during setup, so it never gets in the way
+// of the tour). Resolves true once one is picked, false if the student closes it.
+export async function ensureAi() {
+  if (state.settings.aiProvider) return true;
+  return (await import("./aisetup.js")).openAiSetup();
+}
+const saveSettingsLocal = (patch) => import("./core.js").then((m) => m.saveSettings(patch));
+
+export async function handToAI(text, { expect = null, meta = {}, title = "", files = [], chat = null, forceWeb = null } = {}) {
+  if (!(await ensureAi())) throw new Error("Set up your AI first (Settings › Your AI).");
+  // Inside CampusPilot (Gemini with the student's key, or Chrome's built-in AI for small jobs) when it can run here.
+  if (!forceWeb) {
+    const engine = await engineFor({ expect, files, chat });
+    if (engine) {
+      let req = { text, files };
+      if (chat?.fallback) { const f = await chat.fallback(); req = { text: f.text, files: f.files || [] }; } // no saved chats here: the whole request
+      if (!expect) return openAnswer({ ...req, title });
+      const ran = await runDirect(engine, { ...req, expect, meta, title }, { importReply, fallback: viaWebsite });
+      if (ran) return;
+    }
+  }
+  if (forceWeb) state.aiOverride = forceWeb;
   await copyText(text); // first, while the panel still has focus
   lastClip = text;
   const p = ai();
@@ -45,7 +68,7 @@ export async function handToAI(text, { expect = null, meta = {}, title = "", fil
   let tab = null, reused = false, skip = 0;
   if (chat?.url && p.url) {
     tab = await openChat(chat.url);
-    // Only checkable on sites StudyPilot may fill; elsewhere the saved chat is opened and trusted.
+    // Only checkable on sites CampusPilot may fill; elsewhere the saved chat is opened and trusted.
     const alive = canFillHere ? await chatAlive(tab.id, chat.url) : { alive: true, blocks: 0 };
     if (alive.alive) { reused = true; skip = alive.blocks; if (!chat.keepFiles) files = []; }
     else {
@@ -65,7 +88,7 @@ export async function handToAI(text, { expect = null, meta = {}, title = "", fil
     views.banner?.(); // show the waiting bar right away
     const sheet = $("#sheet"); if (sheet?.open) sheet.close();
   }
-  // Start watching the AI tab for the reply right away (only on AI sites StudyPilot is allowed to fill).
+  // Start watching the AI tab for the reply right away (only on AI sites CampusPilot is allowed to fill).
   const watching = !!(expect && tab && canFillHere);
   if (watching) startWatching();
 
@@ -77,17 +100,25 @@ export async function handToAI(text, { expect = null, meta = {}, title = "", fil
   }
   const filesDone = !files.length || fill?.attached === files.length;
   if (files.length && !filesDone) {
-    state.handoff = await makeBundle(title || "StudyPilot", text, files);
+    state.handoff = await makeBundle(title || "CampusPilot", text, files);
     chrome.downloads.show(state.handoff.mdId);
   } else state.handoff = null;
 
   const where = !p.url ? "your AI" : reused ? `the same ${p.name} chat as before` : chat ? `a new ${p.name} chat (the earlier one is gone)` : p.name;
-  const after = !expect ? "" : watching ? ` StudyPilot will pick up the answer by itself when ${p.name} finishes (or copy it and come back here).` : " When it answers, copy the whole reply and come back here.";
-  if (fill?.filled && filesDone) toast(`Ready in ${where}: check it and press Send.${after}`, { ms: 10000 });
+  const after = ""; // the bar at the bottom says what happens next
+  if (fill?.filled && filesDone) toast(`Ready in ${where}: press Send.`, { ms: 6000 });
   else if (fill?.filled) toast(`Text is in ${where}. Drag the ${plural(files.length, "file")} from the folder that opened into the chat, then press Send.${after}`, { ms: 12000 });
   else if (files.length) toast(`Copied. Drag the ${plural(files.length, "file")} from the folder into ${where}, paste (Ctrl/⌘ + V) and press Enter.${after}`, { ms: 12000 });
-  else toast(`Copied. Paste it into ${where} (Ctrl/⌘ + V) and press Enter.${after}`, { ms: 10000 });
+  else toast(`Copied. Paste it into ${where} and press Enter.`, { ms: 6000 });
   rerender();
+}
+
+// The way that always works: the same request through Gemini's website (copy, paste, Send).
+async function viaWebsite(r) {
+  stopDirect();
+  state.pending = null; state.watch = null;
+  await chrome.storage.local.remove(PENDING_KEY);
+  return handToAI(r.text, { expect: r.expect, meta: r.meta, title: r.title, files: r.files || [], forceWeb: "gemini" });
 }
 
 // ---------- continuing an earlier chat ----------
@@ -111,7 +142,7 @@ async function openChat(url) {
   return chrome.tabs.create({ url, active: true });
 }
 // Loads the chat and checks it's really there (deleted chats redirect to a new chat or show "not found").
-// Also counts StudyPilot blocks already in it, so the watcher only picks up the new reply.
+// Also counts CampusPilot blocks already in it, so the watcher only picks up the new reply.
 const tabLoaded = (tabId) => new Promise((r) => {
   const done = () => { chrome.tabs.onUpdated.removeListener(on); clearTimeout(t); r(); };
   const on = (id, info) => { if (id === tabId && info.status === "complete") done(); };
@@ -142,7 +173,9 @@ function pageChatAlive(saved) {
 }
 
 export async function cancelPending() {
+  if (state.pending?.direct) stopDirect();
   state.pending = null;
+  state.aiOverride = null;
   state.watch = null;
   stopWatching();
   await chrome.storage.local.remove(PENDING_KEY);
@@ -159,21 +192,21 @@ async function refreshSheet() {
 
 // ---------- reading the reply ----------
 let lastClip = "";
-// StudyPilot's own requests contain example blocks; never mistake one for the AI's answer.
+// CampusPilot's own requests contain example blocks; never mistake one for the AI's answer.
 const isOwnRequest = (t) => /^\s*# /.test(t) && /(## Reply format|Reply with ONLY one code block)/.test(t);
 export async function importReply(text, { quiet = false } = {}) {
-  if (isOwnRequest(text)) { if (!quiet) throw new Error("That's the request StudyPilot copied for your AI, not its reply. Send it to your AI, then copy the AI's answer."); return false; }
+  if (isOwnRequest(text)) { if (!quiet) throw new Error("That's the request CampusPilot copied for your AI, not its reply. Send it to your AI, then copy the AI's answer."); return false; }
   const kind = findReplyBlock(text);
   const p = state.pending;
   if (!kind) { if (!quiet) throw new Error("That doesn't look like the reply. Copy the AI's whole answer, including the code block at the end."); return false; }
   // Never import a reply that stopped part-way (the Stop button, a network error, a length limit).
   if (!replyProgress(kind, text).done) {
     if (state.pending) { state.watch = { ...(state.watch || {}), phase: "cut" }; rerender(); }
-    throw new Error(`That reply stopped before it finished, so StudyPilot didn't add any of it. Ask your AI to write it again ("Ask to redo" in the banner), then try again.`);
+    throw new Error(`That reply stopped before it finished, so CampusPilot didn't add any of it. Ask your AI to write it again ("Ask to redo" in the banner), then try again.`);
   }
   if (kind === "sizes" || kind === "priorities") {
     const meta = p?.expect === kind ? p.meta : null;
-    if (!meta) throw new Error("Start your study plan from Today first, then copy the reply.");
+    if (!meta) throw new Error("Start your study plan from Home first, then copy the reply.");
     const P = await import("./plan.js");
     await (kind === "sizes" ? P.importSizes(text, meta) : P.importPriorities(text, meta));
     const chat = await chatOf(p);
@@ -252,17 +285,14 @@ export async function importReply(text, { quiet = false } = {}) {
     if (p?.expect === "quiz") await cancelPending();
     toast(`${quiz.name} saved: ${plural(records.length, "question")}`, { ms: 5000 });
   } else {
-    state.planSessions = await send("PARSE_PLAN", { text });
-    if (p?.expect === "plan") await cancelPending();
-    toast(`Found ${plural(state.planSessions.length, "study session")} in the plan`);
-    go("today");
+    throw new Error("CampusPilot couldn't find anything it asked for in that reply. Copy your AI's whole answer, including the block that starts with ```campuspilot.");
   }
   rerender();
   return true;
 }
 
 // ---------- picking the reply up from the AI's tab ----------
-// Every few seconds while a reply is expected: read StudyPilot's code block from the AI tab (only that, read-only),
+// Every few seconds while a reply is expected: read CampusPilot's code block from the AI tab (only that, read-only),
 // and import it once the AI has finished writing (no Stop button, and the text hasn't changed for two checks).
 let watchTimer = null, lastSeen = "", sameCount = 0, warned = false;
 export function startWatching() {
@@ -287,7 +317,7 @@ async function watchOnce() {
   // Stopped writing. Only a complete reply counts: interrupted, cut-off or failed replies are left alone.
   if (!prog.done) { setWatch({ phase: "cut", got: prog.got, total: 0, stopped: res.stopped }); return; }
   setWatch({ phase: "reading", got: prog.got, total: prog.total });
-  const tag = { quiz: "studypilot-quiz", checklist: "studypilot-checklist", plan: "studypilot-plan", weights: "studypilot-weights", schedule: "studypilot-schedule", sizes: "studypilot-sizes", priorities: "studypilot-priorities" }[p.expect];
+  const tag = { quiz: "campuspilot-quiz", checklist: "campuspilot-checklist", plan: "campuspilot-plan", weights: "campuspilot-weights", schedule: "campuspilot-schedule", sizes: "campuspilot-sizes", priorities: "campuspilot-priorities" }[p.expect];
   const text = /```/.test(res.text) ? res.text : `\`\`\`${tag}\n${res.text}\n\`\`\``;
   try {
     stopWatching();
@@ -307,18 +337,20 @@ function setWatch(w) {
 }
 const NOUN = { quiz: "question", checklist: "item", schedule: "class time", sizes: "estimate", priorities: "task" };
 function watchText() {
+  if (state.pending?.direct) return directWatchText();
   const p = state.pending, w = state.watch || { phase: "send" }, name = ai().url ? ai().name : "your AI";
   const noun = NOUN[p?.expect];
   const so = noun && w.got ? `${plural(w.got, noun)} so far` : "";
   if (!watchTimer && w.phase !== "cut") return { label: `Waiting for ${name}`, sub: `When it answers, copy its whole reply and come back here.`, pct: null };
   switch (w.phase) {
-    case "thinking": return { label: `${name} is thinking…`, sub: "StudyPilot will add the answer by itself when it's done.", pct: null };
+    case "thinking": return { label: `${name} is thinking…`, sub: "CampusPilot will add the answer by itself when it's done.", pct: null };
     case "writing": return { label: `${name} is writing${so ? `: ${so}` : "…"}`, sub: "Keep this panel open; it's added by itself when it finishes.", pct: w.total ? Math.min(99, (100 * w.got) / w.total) : null };
     case "reading": return { label: `Adding ${so ? plural(w.got, noun) : "the answer"}…`, sub: "", pct: 100 };
-    case "cut": return { label: "The reply stopped before it finished", sub: `${w.stopped ? `${name} stopped or hit an error` : "It ended part-way through"}, so nothing was added. Ask it to redo the answer; StudyPilot keeps watching.`, pct: 0, cut: true };
-    default: return { label: `Waiting for ${name}`, sub: "Press Send there. StudyPilot picks up the answer by itself when it's done.", pct: null };
+    case "cut": return { label: "The reply stopped before it finished", sub: `${w.stopped ? `${name} stopped or hit an error` : "It ended part-way through"}, so nothing was added. Ask it to redo the answer; CampusPilot keeps watching.`, pct: 0, cut: true };
+    default: return { label: `Waiting for ${name}`, sub: "Press Send there. CampusPilot picks up the answer by itself when it's done.", pct: null };
   }
 }
+views.paintWatch = () => paintWatch();
 const measureDock = () => { const el = $(".card.banner.wait"); if (el) document.body.style.setProperty("--dock", `${el.offsetHeight}px`); };
 function paintWatch() {
   const box = $("#wait-progress");
@@ -354,7 +386,7 @@ export function resumeWatching() { if (state.pending?.tabId && !watchTimer) star
 
 // When the panel gets focus again and a reply is expected, look at the clipboard (needs the clipboardRead permission).
 async function checkClipboard() {
-  if (!state.pending || state.settings.aiClipboard === false || !document.hasFocus()) return;
+  if (!state.pending || state.pending.direct || state.settings.aiClipboard === false || !document.hasFocus()) return;
   let text = "";
   try { text = await navigator.clipboard.readText(); } catch { return; }
   if (!text || text === lastClip || text.length < 40) return;
@@ -367,7 +399,11 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) setT
 
 export async function restorePending() {
   const { [PENDING_KEY]: p } = await chrome.storage.local.get(PENDING_KEY);
-  if (p && Date.now() - p.at < 3 * 3600e3) { state.pending = p; resumeWatching(); } else if (p) chrome.storage.local.remove(PENDING_KEY);
+  if (p?.direct && Date.now() - p.at < 3 * 3600e3) {
+    // The panel was closed while CampusPilot was asking: ask again (the request was kept).
+    state.pending = p;
+    setTimeout(() => { if (state.pending === p) rerunPending({ importReply, fallback: viaWebsite }).catch(() => {}); }, 800);
+  } else if (p && Date.now() - p.at < 3 * 3600e3) { state.pending = p; resumeWatching(); } else if (p) chrome.storage.local.remove(PENDING_KEY);
 }
 
 // "Paste reply": clicking counts as a user gesture, so the clipboard can be read even without the permission.
@@ -407,18 +443,21 @@ views.banner = () => {
       act("Add", () => importReply(ta.value), { cls: "btn small block", busyLabel: "Reading…", attrs: { style: "margin-top:6px" } }));
     const what = { quiz: "questions", checklist: "the checklist", weights: "grade weights", plan: "your plan", schedule: "class times", sizes: "time estimates", priorities: "your study plan" }[q.expect] || "the answer";
     const t = watchText();
-    box.append(h("div", { class: "card banner wait" },
-      h("div", { class: "meta", style: "margin-bottom:4px" }, q.title || `${what[0].toUpperCase()}${what.slice(1)}`),
-      state.queueRun && !state.queueRun.only ? h("div", { class: "meta", style: "margin:-2px 0 4px" }, `From your list: ${state.queueRun.done + 1} of ${state.queueRun.total}. The next one is filled in when this reply comes in. `,
-        h("button", { class: "linkish", onclick: () => { import("./queue.js").then((m) => m.stopQueue()); toast("The list stops after this request."); } }, "Stop after this one")) : null,
-      h("div", { id: "wait-progress", role: "status", "aria-live": "polite" },
-        h("b", { class: "wait-label" }, t.label),
-        h("div", { class: `loadbar${t.pct == null ? " indeterminate" : ""}${t.cut ? " cut" : ""}`, role: "progressbar", "aria-label": "Progress" }, h("span", { style: t.pct == null ? "" : `width:${t.pct}%` })),
-        h("div", { class: "meta wait-sub" }, t.sub)),
-      h("div", { class: "actions" },
-        t.cut ? act("Ask to redo", askRedo, { cls: "btn small", busyLabel: "Opening…" }) : null,
-        act("Paste reply", () => pasteFromClipboard(manual), { cls: `btn small${t.cut ? " secondary" : ""}`, ico: "inbox", busyLabel: "Reading…" }),
-        h("button", { class: "btn small soft", onclick: () => { import("./queue.js").then((m) => m.stopQueue()); cancelPending(); } }, "Cancel")),
+    const run = state.queueRun && !state.queueRun.only && state.queueRun.total > 1 ? state.queueRun : null;
+    box.append(h("div", { class: `card banner wait slim${t.cut ? " is-cut" : ""}`, title: q.title || "" },
+      h("div", { class: "wait-row" },
+        h("div", { id: "wait-progress", class: "grow", role: "status", "aria-live": "polite" },
+          h("b", { class: "wait-label" }, t.label),
+          h("div", { class: "meta wait-what" }, run ? `Step ${run.done + 1} of ${run.total} · ` : "", q.title || `${what[0].toUpperCase()}${what.slice(1)}`),
+          h("div", { class: `meta wait-sub${t.cut ? "" : " desc"}` }, t.sub),
+          h("div", { class: `loadbar${t.pct == null ? " indeterminate" : ""}${t.cut ? " cut" : ""}`, role: "progressbar", "aria-label": "Progress" }, h("span", { style: t.pct == null ? "" : `width:${t.pct}%` }))),
+        q.direct ? (t.cut ? [
+          act("Try again", () => rerunPending({ importReply, fallback: viaWebsite }), { cls: "btn small", busyLabel: "Starting…" }),
+          act("Website", () => viaWebsite({ ...q.request, expect: q.expect, meta: q.meta, title: q.title }), { cls: "btn small secondary", busyLabel: "Opening…", attrs: { title: "Send it through Gemini's website instead" } })] : null)
+        : [t.cut ? act("Redo", askRedo, { cls: "btn small", busyLabel: "Opening…" }) : null,
+          act("Paste", () => pasteFromClipboard(manual), { cls: `btn small${t.cut ? " secondary" : ""}`, ico: "inbox", busyLabel: "Reading…", attrs: { title: "Paste your AI's reply" } })],
+        h("button", { class: "x-btn", title: "Cancel this request", "aria-label": "Cancel this request", onclick: () => { import("./queue.js").then((m) => m.stopQueue()); cancelPending(); } }, icon("close", 16))),
+      run && run.done + 1 < run.total ? h("button", { class: "linkish wait-stop", onclick: () => { import("./queue.js").then((m) => m.stopQueue()); toast("The list stops after this request."); } }, "Stop the list after this one") : null,
       manual));
     requestAnimationFrame(measureDock);
     ta.addEventListener("focus", () => requestAnimationFrame(measureDock));

@@ -99,7 +99,7 @@ async function prepare(scope, { attach = false } = {}) {
       if (needsFile) mustAttach = true;
       if (needsFile || (attach && (d.file.size || 0) <= MAX_ATTACH_BYTES)) {
         const name = unique(d.file.name);
-        files.push({ url: d.file.url, name, size: d.file.size });
+        files.push({ url: d.file.url, name, size: d.file.size, id: d.file.id, type: d.file.type });
         return { doc: d, attachName: name, inline: hasText && !attach ? false : hasText };
       }
       return { doc: d, inline: true };
@@ -147,7 +147,7 @@ async function flashcards(scope) {
         return (await import("./queue.js")).aiAction({ kind: "terms", courseId: scope.courseId, course: scope.title, lecture: scope.lectures[0] });
       return;
     }
-    return toast(scope.kind === "lecture" ? "Flashcards are this lecture's key terms, which come with its checklist. Build the checklist first (Lecture mastery, above)." : "Flashcards are the key terms from your lecture checklists. Build a checklist for some of these lectures first.", { ms: 8000 });
+    return toast(scope.kind === "lecture" ? "Flashcards are this lecture's key terms. Set up the lecture first." : "Flashcards are the key terms from your lecture checklists. Build a checklist for some of these lectures first.", { ms: 8000 });
   }
   await addQuestions(cards); // keeps progress on cards you've seen
   state.bank = null;
@@ -175,7 +175,7 @@ async function downloadScope(scope) {
   if (!list.length) return toast("These lectures are text pages with no files. Use Study guide or Practice instead.", { ms: 6000 });
   if (!confirmSize(list.reduce((n, f) => n + (f.size || 0), 0), "These lecture files")) return;
   const r = await send("ZIP_FILES", { files: list, onlyNew: false });
-  toast(r.zips.length ? `Saved ${plural(r.done, "file")} as a zip in Downloads › StudyPilot` : "Nothing new to download", { ms: 7000 });
+  toast(r.zips.length ? `Saved ${plural(r.done, "file")} as a zip in Downloads › CampusPilot` : "Nothing new to download", { ms: 7000 });
 }
 
 // ---------- notebooks ----------
@@ -210,11 +210,11 @@ export async function openSheet(scope) {
   const quizzes = await quizzesForScope(scope);
   const p = ai();
   const aiName = p.url ? p.name : "your AI";
-  const closeSheet = () => { dlg.close(); };
+  const closeSheet = () => { if (!dlg.classList.contains("answer")) dlg.close(); }; // an answer opened in its place stays open
   const run = (fn) => async (e) => { const b = e.currentTarget; b.disabled = true; try { await fn(); closeSheet(); } catch (err) { toast(err.message, { error: true, ms: 8000 }); } finally { b.disabled = false; } };
   const tile = (ico, title, sub, fn, { primary = false, disabled = false } = {}) =>
     h("button", { class: "sheet-tile" + (primary ? " primary" : ""), disabled, onclick: run(fn) },
-      h("span", { class: "ico-wrap" }, icon(ico, 20)), h("span", { class: "grow" }, h("b", {}, title), h("small", {}, sub)), icon("chevron", 16));
+      h("span", { class: "ico-wrap" }, icon(ico, 20)), h("span", { class: "grow" }, h("b", {}, title), h("small", {}, sub)), icon(disabled ? "lock" : "chevron", 16));
 
   const isNb = scope.kind === "notebooks";
   const prog = st.total ? `${plural(st.total, "question")} · ${st.due} due · ${st.level}` : "No questions yet";
@@ -247,22 +247,24 @@ export async function openSheet(scope) {
         await deleteQuiz(z.id); openSheet(scope);
       } })), quizzes.length > 6 ? h("div", { class: "hint" }, `+${quizzes.length - 6} older quizzes in Practice`) : null) : null,
       mastery ? null : (scope.kind === "module" || scope.kind === "course")
-        ? tile("spark", "Course quiz", "Pick lectures and how much each counts; questions come from your lecture mastery", () => import("./coursequiz.js").then((m) => m.openCourseQuiz(scope.courseId, { preselect: scope.lectures.map((l) => l.key) })))
+        ? tile("spark", "Mixed test", "Pick lectures and how much each counts; questions come from your lecture mastery", () => import("./coursequiz.js").then((m) => m.openCourseQuiz(scope.courseId, { preselect: scope.lectures.map((l) => l.key) })))
         : tile("spark", quizzes.length ? "New quiz" : "Make a quiz", `${aiName} writes ${state.settings.quizCount || 10} questions; you take it here`, () => getQuestions(scope), { primary: !quizzes.length }),
       st.total > (quizzes[0]?.questionIds.length || 0) ? tile("play", "Mixed practice", st.due ? `${st.due} due for review first, from all ${st.total} questions` : `From all ${st.total} questions, weakest first`, () => views.startScope(scope, "practice")) : null,
       st.mistakes ? tile("review", `My mistakes (${st.mistakes})`, "Questions you missed, until you get each right twice in a row", () => views.startScope(scope, "mistakes", { count: 20 })) : null,
       st.total >= 5 ? tile("timer", "Exam mode", "A timed mix with answers at the end", () => views.startScope(scope, "exam", { timed: true })) : null),
     mastery ? null : topicsSec,
-    h("div", { class: "sheet-sec" }, h("div", { class: "sheet-label" }, "Study"),
+    mastery ? null : h("div", { class: "sheet-sec" }, h("div", { class: "sheet-label" }, "Study"),
       !isNb ? tile("cards", "Flashcards", "Key terms, from the lecture checklist", () => flashcards(scope)) : null,
       tile("book", "Study guide", `A summary, key ideas and examples in ${aiName}`, () => mastery ? import("./mastery.js").then((m) => m.lectureChatAsk(scope, "guide")) : studyGuide(scope, "review")),
       mastery ? tile("pen", "Ask about this lecture", `Opens a chat with ${aiName} that has this lecture, for questions in your own words`, () => import("./mastery.js").then((m) => m.lectureChatAsk(scope, "ask"))) : null),
-    !isNb && scope.lectures?.some((l) => l.type === "File" || l.type === "Page") ? h("div", { class: "sheet-sec" }, h("div", { class: "sheet-label" }, "Files"),
-      tile("download", "Download", "Slides and images as one zip in Downloads › StudyPilot", () => downloadScope(scope))) : null));
+    !mastery && !isNb && scope.lectures?.some((l) => l.type === "File" || l.type === "Page") ? h("div", { class: "sheet-sec" }, h("div", { class: "sheet-label" }, "Files"),
+      tile("download", "Download", "Slides and images as one zip in Downloads › CampusPilot", () => downloadScope(scope))) : null));
   if (!dlg.open) dlg.showModal();
 }
 
 export const makeQuiz = (scope, opts) => getQuestions(scope, opts);
+export const openFlashcards = (scope) => flashcards(scope);
+export const downloadLecture = (scope) => downloadScope(scope);
 export const makeStudyGuide = (scope, mode = "review") => studyGuide(scope, mode);
 
 // Offered after sending text only when the material has figures the AI couldn't see.

@@ -1,13 +1,13 @@
 {
   "manifest_version": 3,
-  "name": "StudyPilot \u2013 study planner for Canvas LMS",
-  "version": "5.13.0",
-  "description": "A friendlier Canvas: course pages, in-app practice quizzes, grade calculator, plans and study packs for any AI.",
+  "name": "CampusPilot \u2013 study planner for Canvas LMS",
+  "version": "6.5.0",
+  "description": "Master your Canvas lectures, plan your week around your classes, and study with the AI you already use.",
   "permissions": [
+    "activeTab",
     "storage",
     "sidePanel",
     "alarms",
-    "activeTab",
     "scripting",
     "clipboardWrite",
     "downloads",
@@ -31,7 +31,7 @@
     "default_path": "sidepanel/sidepanel.html"
   },
   "action": {
-    "default_title": "StudyPilot",
+    "default_title": "CampusPilot",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",
@@ -116,7 +116,8 @@
   "web_accessible_resources": [
     {
       "resources": [
-        "lib/look.js"
+        "lib/look.js",
+        "lib/darken.js"
       ],
       "matches": [
         "https://*.instructure.com/*"

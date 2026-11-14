@@ -2,7 +2,7 @@
 // key terms, class times). Start runs them one after another: each request is filled in, the reply is picked up
 // by itself, and the next one follows. The student only presses Send each time.
 // New lectures (in courses where the student uses lecture mastery) and the next part of a lecture join on their own.
-import { state, toast, plural, ai, lecturesFor, rerender, saveSettings } from "./core.js";
+import { state, toast, plural, ai, lecturesFor, rerender, saveSettings, send } from "./core.js";
 
 const KEY = "aiQueue";
 export const jobKey = (j) => `${j.kind}:${j.lecture?.key || (j.refs || []).join(",")}:${j.n || ""}`;
@@ -59,7 +59,7 @@ async function runJob(j) {
   if (j.kind === "classTimes") return (await import("./weekai.js")).findClassTimes(j.courseIds || null);
   if (j.kind === "sizes") return (await import("./plan.js")).requestSizes(j.refs || []);
   if (j.kind === "priorities") return (await import("./plan.js")).requestPriorities();
-  throw new Error("StudyPilot doesn't know this request anymore; remove it from the list.");
+  throw new Error("CampusPilot doesn't know this request anymore; remove it from the list.");
 }
 
 // ---------- running the list ----------
@@ -77,18 +77,49 @@ export async function restoreRun() {
   }
 }
 /** Starts the list (or one job from it). Each finished reply starts the next request by itself. */
+// Most urgent first: a lecture the study plan has you learning soonest, or whose course has the nearest exam, goes
+// ahead. Jobs for the same lecture keep their order (checklist, then Part 1, Part 2…); jobs with no date, and steps
+// being tried a second time, come after.
+export async function urgentFirst(list) {
+  if (list.length < 2) return list;
+  const { plan } = await chrome.storage.local.get("plan");
+  const exams = await send("ALL_EXAMS").catch(() => []);
+  const soon = (d) => { const t = Date.parse(d); return Number.isFinite(t) && t > Date.now() - 864e5 ? t : Infinity; };
+  const byLecture = new Map(), byCourse = new Map();
+  for (const t of plan?.tasks || []) if (/^lec:/.test(t.ref)) byLecture.set(t.ref.slice(4), Math.min(byLecture.get(t.ref.slice(4)) ?? Infinity, soon(t.earliest || t.latest)));
+  for (const e of exams || []) byCourse.set(String(e.courseId), Math.min(byCourse.get(String(e.courseId)) ?? Infinity, soon(e.date)));
+  // rounds of a lecture already being set up finish before a new lecture starts (so it's ready to study sooner)
+  const started = (j) => (j.kind === "part" && !j.topUp ? 1 : 0);
+  const when = (j) => Math.min(byLecture.get(j.lecture?.key) ?? Infinity, byCourse.get(String(j.courseId)) ?? Infinity);
+  return list.map((j, i) => ({ j, i, w: when(j) })).sort((a, b) => (a.j.tries ? 1 : 0) - (b.j.tries ? 1 : 0) || started(b.j) - started(a.j) || (a.w === b.w ? a.i - b.i : a.w - b.w)).map((x) => x.j);
+}
+
 export async function startQueue(onlyId = null) {
   if (state.pending) return toast("Your AI is still answering the last request. The list continues when that reply comes in.", { ms: 7000 });
   const list = await getQueue();
-  const j = onlyId ? list.find((x) => x.id === onlyId) : list[0];
+  const j = onlyId ? list.find((x) => x.id === onlyId) : (await urgentFirst(list))[0];
   if (!j) return;
   state.queueRun = { only: !!onlyId, done: 0, total: onlyId ? 1 : list.length };
   saveRun(state.queueRun);
   await next(j);
 }
 async function next(j) {
+  // Study sets made by themselves (autosets.js) only use Gemini's careful models, so they're as good as they can be:
+  // when today's careful requests are down to the reserve, the list pauses until tomorrow (the student's own
+  // requests still run, on the quick models).
+  if (j.auto && ai().direct) {
+    const { carefulLeft, RESERVE } = await import("../lib/gemini.js");
+    if ((await carefulLeft().catch(() => 99)) <= RESERVE) {
+      state.queueRun = null; saveRun(null);
+      await chrome.storage.local.set({ autoPausedOn: new Date().toDateString() });
+      toast("Today's study sets are done. The rest are made tomorrow, when Gemini's free requests come back.", { ms: 8000 });
+      rerender();
+      return;
+    }
+  }
   await removeJob(j.id);
   state.queueRun.current = jobLabel(j).title;
+  state.queueRun.job = j; // so a failed step can be moved to the end (see skipFailed)
   saveRun(state.queueRun);
   try { await runJob(j); }
   catch (e) {
@@ -114,9 +145,31 @@ export async function afterReply() {
     return;
   }
   run.total = run.done + list.length; // things can join while the list runs (Part 1 after a checklist)
-  setTimeout(() => { if (state.queueRun === run && !state.pending) next(list[0]); }, 1200);
+  const first = (await urgentFirst(list).catch(() => list))[0];
+  setTimeout(() => { if (state.queueRun === run && !state.pending) next(first); }, 1200);
 }
 export function stopQueue() { state.queueRun = null; saveRun(null); rerender(); }
+
+/**
+ * A step of a running list failed (Gemini busy, offline…): don't hold up the rest. The step goes to the end of the
+ * list to try once more later, and the next one starts. Returns false when there's no list to carry on with.
+ */
+export async function skipFailed(why = "") {
+  if (!state.queueRun) { const { aiQueueRun } = await chrome.storage.local.get("aiQueueRun"); if (aiQueueRun) state.queueRun = aiQueueRun; }
+  const run = state.queueRun;
+  if (!run || run.only) return false;
+  const j = run.job;
+  if (j && (j.tries || 0) < 1) await addJob({ ...j, tries: (j.tries || 0) + 1 }, { quiet: true });
+  else if (j) (run.skipped ||= []).push(jobLabel(j).title);
+  const list = await getQueue();
+  if (!list.length) { state.queueRun = null; saveRun(null); rerender(); return true; }
+  run.total = run.done + list.length;
+  saveRun(run);
+  toast(`${j ? jobLabel(j).title : "That step"} didn't finish${why ? ` (${why})` : ""}. ${j && (j.tries || 0) < 1 ? "It's moved to the end of the list; " : ""}carrying on with the next one.`, { ms: 8000 });
+  const first = (await urgentFirst(list).catch(() => list))[0];
+  setTimeout(() => { if (state.queueRun === run && !state.pending) next(first); }, 1500);
+  return true;
+}
 
 // ---------- adding things on their own ----------
 // Courses where new lectures join the list: on once the student has made a checklist there (they use mastery in

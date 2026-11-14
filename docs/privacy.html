@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>StudyPilot Privacy Policy</title>
+<title>CampusPilot Privacy Policy</title>
 <style>
   :root { --bg: #ffffff; --ink: #1f2328; --muted: #59636e; --line: #d8dee4; --accent: #2f6fed; }
   @media (prefers-color-scheme: dark) { :root { --bg: #111418; --ink: #e8eaed; --muted: #a2a9b3; --line: #2c3138; --accent: #7aa7ff; } }
@@ -15,48 +15,55 @@
 </head>
 <body>
 <main>
-<p><a href="./">&larr; StudyPilot home</a></p>
-<h1>StudyPilot Privacy Policy</h1>
-<p class="meta">Last updated: November 12, 2026</p>
+<p><a href="./">&larr; CampusPilot home</a></p>
+<h1>CampusPilot Privacy Policy</h1>
+<p class="meta">Last updated: November 14, 2026</p>
 
-<p>StudyPilot is a browser extension that helps students study from their own Canvas courses. This policy explains what it reads, where that information is kept, and what is shared. In short: <b>StudyPilot has no server. Your information stays in your browser and, if you sign in, in a private folder in your own Google Drive.</b></p>
+<p>CampusPilot is a browser extension that helps students study from their own Canvas courses. This policy explains what it reads, where that information is kept, and what is shared. In short: <b>Your information stays in your browser and, if you sign in, in a private folder in your own Google Drive. If you set up Gemini, your requests go straight from your browser to Google. CampusPilot's developer receives something only when you press Send on a problem report or a tool suggestion, and you see exactly what's in it first.</b></p>
 
-<h2>What StudyPilot reads</h2>
+<h2>What CampusPilot reads</h2>
 <ul>
-  <li><b>Canvas:</b> your courses, assignments, due dates, grades, modules, pages, files, announcements and your own submissions, read with your existing Canvas login. StudyPilot only reads; it never submits, posts or changes anything in Canvas. It never opens quizzes, tests or outside tools, and skips locked items.</li>
-  <li><b>Optional connections you turn on:</b> Gradescope (your own submissions and graded copies), your school's lecture video site (captions of recordings you can watch), JupyterHub (your notebooks, from the hub each course uses), and a private calendar link (only busy times, not event names). Each is read with your own login on that site, only after you connect it.</li>
-  <li><b>The page you ask about:</b> when you choose "Explain this page", the text of the Canvas page you're on.</li>
-  <li><b>Your AI's chat tab (only on AI sites you allow):</b> after StudyPilot fills in a request, it reads back only its own reply block from that chat when the answer is finished, and checks whether a chat it used before still exists. It doesn't read your other chats or anything else on the AI's site.</li>
+  <li><b>Canvas:</b> your courses, assignments, due dates, grades, modules, pages, files, announcements and your own submissions, read with your existing Canvas login. CampusPilot only reads; it never submits, posts or changes anything in Canvas. It never opens quizzes, tests or outside tools, and skips locked items.</li>
+  <li><b>Optional connections you turn on:</b> Gradescope (your own submissions and graded copies; when a course's Canvas menu links to Gradescope, CampusPilot can open that link once in a background tab to find the matching Gradescope course), your school's lecture video site (captions of recordings you can watch) and JupyterHub (your notebooks, from the hub each course uses). Each is read with your own login on that site, only after you connect it.</li>
+  <li><b>Your AI's chat tab (only on AI sites you allow):</b> after CampusPilot fills in a request, it reads back only its own reply block from that chat when the answer is finished, and checks whether a chat it used before still exists. It doesn't read your other chats or anything else on the AI's site.</li>
 </ul>
 
 <h2>Where your information is kept</h2>
 <ul>
-  <li><b>In your browser:</b> course data, lecture text, lecture checklists, practice questions and progress, your weekly calendar (class times, your sections, study time), your study plan and time estimates, your list of requests for your AI, grade calculators and settings are stored locally by the extension.</li>
-  <li><b>In your Google Drive (only if you sign in):</b> a copy of your StudyPilot data is saved in Drive's private app data folder, so it can sync between your computers. Only StudyPilot can open this folder, and it doesn't appear among your Drive files.</li>
+  <li><b>Your Gemini key (only if you set up Gemini):</b> stored in your browser on this computer only. It is never synced to Drive, never included in exports or backups, and never sent anywhere except to Google's Gemini API with your requests. Settings → Your AI → Remove the key deletes it.</li>
+  <li><b>In your browser:</b> course data, lecture text, lecture checklists, practice questions and progress, your weekly calendar (class times, your sections, study time), your study plan and time estimates, your list of requests for your AI, What-If calculators and settings are stored locally by the extension.</li>
+  <li><b>In your Google Drive (only if you sign in):</b> a copy of your CampusPilot data (lecture checklists and progress, practice questions and quizzes, My week, your study plan, What-If calculators, exam dates and settings, but never your Canvas access token or Gemini key) is saved in Drive's private app data folder, so it can sync between your computers. Copies of the lecture files CampusPilot has read (PDFs, slide decks, documents and pictures from your Canvas courses; never videos or audio; up to 100 MB each and 2 GB in total) are kept in the same folder, so your other computers can open them. They count toward your Drive storage. Settings → Advanced shows them and can delete them. Only CampusPilot can open this folder, and it doesn't appear among your Drive files.</li>
+  <li><b>Lecture files, on this computer:</b> each lecture file CampusPilot reads from Canvas (never videos or audio) is saved in the extension's own storage, so slides open and your AI can read a lecture even when Canvas won't hand the file over again. Settings → Advanced → Clear deletes them; removing CampusPilot deletes them too.</li>
   <li><b>Also only in your browser:</b> your search index, focus-timer history, change alerts and to-do marks. Search runs on your own computer; what you search for is never sent anywhere.</li>
   <li><b>Downloads:</b> files and backups you ask for are saved to your computer's Downloads folder.</li>
 </ul>
 
 <h2>Google user data</h2>
 <ul>
-  <li><b>Google Drive (<code>drive.appdata</code>):</b> used only to store and read StudyPilot's own sync file in your private app data folder. StudyPilot cannot see your other Drive files.</li>
-  <li><b>Google Calendar (<code>calendar.events</code>, only if you turn it on):</b> used only to add, update and remove StudyPilot's own events: the deadlines, class times and planned study time you choose to add. StudyPilot doesn't read your other events. Events it creates are labeled so they can be updated or removed without touching anything else in your calendar.</li>
-  <li>StudyPilot's use and transfer of information received from Google APIs adheres to the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including the Limited Use requirements. Google data is never sold, never used for advertising, never used to train AI models, and never transferred to anyone else.</li>
+  <li><b>Google Drive (<code>drive.appdata</code>):</b> used only to store and read CampusPilot's own sync file and its copies of your lecture files in your private app data folder. CampusPilot cannot see your other Drive files.</li>
+  <li><b>Google Calendar (<code>calendar.events</code>, only if you turn it on):</b> used only to add, update and remove CampusPilot's own events: the deadlines, class times and planned study time you choose to add. CampusPilot doesn't read your other events. Events it creates are labeled so they can be updated or removed without touching anything else in your calendar.</li>
+  <li><b>Google Cloud (<code>cloud-platform</code>, only if you choose “Sign in with Google” to set up Gemini):</b> used once, right after you sign in, to do three things in your own Google account: find or create a Google Cloud project named “CampusPilot” (labelled <code>app=campuspilot</code>, with no billing), turn on the Gemini API in it, and find or create an API key named “campuspilot” that is limited to the Gemini API. CampusPilot reads only that project and that key. The access is handed back (revoked) as soon as the key is made; CampusPilot doesn't keep it and doesn't look at anything else in your Google Cloud account. CampusPilot shows these steps before you sign in.</li>
+  <li>CampusPilot's use and transfer of information received from Google APIs adheres to the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including the Limited Use requirements. Google data is never sold, never used for advertising, never used to train AI models, and never transferred to anyone else.</li>
 </ul>
 
 <h2>What is shared</h2>
 <ul>
-  <li><b>Nothing is sent to StudyPilot's developers.</b> There is no StudyPilot server, analytics or tracking.</li>
-  <li><b>Your AI assistant:</b> when you ask for a lecture checklist, questions, a study guide, class times or a study plan, StudyPilot prepares the request and opens the AI you chose (for example ChatGPT, Claude, Gemini or Copilot). Nothing reaches that AI until you press Send there yourself. Depending on what you asked for, a request can include:
+  <li><b>No analytics or tracking.</b> CampusPilot doesn't collect usage statistics, and nothing is sent to its developer in the background.</li>
+  <li><b>Problem reports (only when you send one):</b> Settings → Help &amp; feedback → Report a problem (or Report on an error message) sends what you write, which kind of report it is, and the email address you give, if any (only so the developer can reply). If you leave <b>Include technical details</b> on, it also sends: the CampusPilot version; your browser and operating system; whether your Canvas uses an instructure.com address or your school's own; how many courses and study sets you have; which features and settings are on (any setting that could hold personal information is only reported as “set” or “empty”); recent error messages (with email addresses, long numbers, links' query strings and keys removed); and the text of the screen you were on, with course names replaced by letters and every digit hidden, so no grades, points or IDs. A screenshot is sent only if you attach one. Never sent: your Canvas files, grades, submissions, passwords, tokens or keys, your Gemini key, or what you've written in CampusPilot. <b>See exactly what's sent</b> shows the whole report before you press Send.</li>
+  <li><b>Tool suggestions (only when you press “Ask for these”):</b> when your courses link to outside tools CampusPilot can't connect to yet (like Piazza or zyBooks), Home offers to tell the developer. Only the tools' names and how many of your courses use each (up to 9) are sent; nothing about you, your school or your courses.</li>
+  <li><b>Where reports go:</b> to CampusPilot's own server at campuspilot.clabianco.fyi, run on Cloudflare. Reports are kept for at most 180 days, only the developer can read them, and they're used only to fix problems and decide what to build. They're never sold or shared, and never used for advertising or to train AI models. Your internet address is not stored: a one-way code made from it, which changes every day, is kept for one day to stop floods of reports. To have a report deleted sooner, email the address below with its reference code.</li>
+  <li><b>Gemini, inside CampusPilot (only if you set it up):</b> your requests (the same material listed below, including lecture files) go from your browser straight to Google's Gemini API with your own key, and Google's answer comes straight back. Nothing goes through CampusPilot's developers. Google's <a href="https://ai.google.dev/gemini-api/terms">Gemini API terms</a> apply: on the free tier, Google may use what you send to improve its products, and people at Google may review it. If you use Gemini's free tier, don't send anything private. Besides the requests below, Gemini (and Google's smaller Gemma models, through the same key) is also used for small jobs: checking new practice questions against the lecture's text; reading a written answer you type in practice, with the question and its key points, to tick the points it covers; sorting course items CampusPilot can't place by title (it sends only item titles and section names); and matching work turned in on Gradescope to Canvas assignments (it sends only assignment names and due dates). To tell core lectures from extra material and pages with nothing to study, it sends item titles and section names, and, for items whose title doesn't say, the first ~1,200 characters of their text. With your OK (asked once on Home), Gemini also makes the study sets for your core lectures in the background, sending the same lecture material as when you set one up yourself.</li>
+  <li><b>Chrome's built-in AI (only if you turn on “Quick tasks on this computer”):</b> small requests (like reading class times from a syllabus) are answered by the AI model built into Chrome, on your own computer. They don't leave your computer.</li>
+  <li><b>Your AI assistant:</b> when you ask for a lecture checklist, questions, a study guide, class times or a study plan, CampusPilot prepares the request and opens the AI you chose (for example ChatGPT, Claude, Gemini or Copilot). Nothing reaches that AI until you press Send there yourself. Depending on what you asked for, a request can include:
     <ul>
       <li>lecture files or their text, and your lecture checklists;</li>
       <li>JupyterHub lecture notebooks (from folders you mark as lecture material): their cells and outputs, their plots as images, and a short description of each data file they use (column names and types, an estimated row count and the first few rows);</li>
-      <li>the parts of your syllabi and course pages that mention class days, times and places (to find class times);</li>
+      <li>the parts of your syllabi and course pages that mention class days, times and places, and the names of the Canvas sections and groups you're in for each course (to find class times and suggest your section);</li>
       <li>assignment names, due dates, points, instructions and attached files (to estimate how long each takes; never quizzes or tests), plus, for JupyterHub homework, the notebook's question text and the same short data descriptions, never your own code or answers;</li>
       <li>for a study plan: deadlines, grade weights, exam dates, how many checklist items you have left, your average time per practice question, the checklist items you miss most, the study time you marked, and any note you write.</li>
     </ul>
     Requests don't include your name, email address, student ID, Canvas login or course grades. A graded assignment is only included when you choose "Learn from lost points" on it. That service's own privacy policy applies to what you send it.</li>
-  <li><b>Fonts:</b> StudyPilot's panel loads its typefaces from Google Fonts, which receives the standard information any web request includes (such as your IP address), but no StudyPilot data.</li>
+  <li><b>Fonts:</b> CampusPilot's panel loads its typefaces from Google Fonts, which receives the standard information any web request includes (such as your IP address), but no CampusPilot data.</li>
   <li><b>Calendar files:</b> "Download calendar" saves a calendar file to your computer; it goes nowhere else unless you import it into a calendar app yourself.</li>
   <li><b>Notifications</b> (only if you turn them on) are shown by Chrome on your computer.</li>
   <li>Information is not sold or shared with advertisers or data brokers.</li>
@@ -64,14 +71,15 @@
 
 <h2>Your choices</h2>
 <ul>
-  <li>Turn any connection off in StudyPilot's Settings, or remove the extension at any time.</li>
-  <li><b>Delete local data:</b> Settings → Data &amp; privacy → Clear all StudyPilot data, or remove the extension.</li>
-  <li><b>Delete synced data:</b> sign out in Settings → Account &amp; sync, then in Google Drive open Settings → Manage apps → StudyPilot → Options → Delete hidden app data.</li>
-  <li><b>Remove Google access:</b> visit <a href="https://myaccount.google.com/permissions">your Google Account's third-party access page</a> and remove StudyPilot.</li>
+  <li>Turn any connection off in CampusPilot's Settings, or remove the extension at any time.</li>
+  <li><b>Delete local data:</b> Settings → Data &amp; privacy → Clear all CampusPilot data, or remove the extension.</li>
+  <li><b>Delete synced data:</b> sign out in Settings → Account &amp; sync, then in Google Drive open Settings → Manage apps → CampusPilot → Options → Delete hidden app data.</li>
+  <li><b>Remove Gemini:</b> Settings → Your AI → Remove the key. To delete the key and the project everywhere, delete the “CampusPilot” project in <a href="https://console.cloud.google.com/">Google Cloud console</a>.</li>
+  <li><b>Remove Google access:</b> visit <a href="https://myaccount.google.com/permissions">your Google Account's third-party access page</a> and remove CampusPilot.</li>
 </ul>
 
 <h2>Children</h2>
-<p>StudyPilot is intended for college and university students and is not directed to children under 13.</p>
+<p>CampusPilot is intended for college and university students and is not directed to children under 13. Setting up Gemini inside CampusPilot needs you to be 18 or older (Google's rule for its Gemini API); students under 18 can use their own AI's website instead, which works the same way.</p>
 
 <h2>Changes</h2>
 <p>If this policy changes, the updated version will be posted on this page with a new date.</p>

@@ -1,4 +1,4 @@
-/* StudyPilot Canvas enhancements: all selectors prefixed with sp- */
+/* CampusPilot Canvas enhancements: all selectors prefixed with sp- */
 .sp-card, .sp-x-panel {
   --sp-ink: #1f2328; --sp-muted: #6b7079; --sp-line: #e6e8eb; --sp-soft: #f5f6f8; --sp-accent: var(--sp-user-accent, #2f6fed); --sp-bg: #fff;
   font: 14px/1.4 "Lato", system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--sp-ink);
@@ -98,7 +98,7 @@ html.sp-noscroll { overflow: hidden !important; }
 .sp-module-quiz:hover { background: color-mix(in srgb, var(--sp-user-accent, #2f6fed) 10%, #fff); }
 @media (prefers-reduced-motion: reduce) { .sp-icon.spin { animation: none; } .sp-fab:hover { transform: none; } }
 
-/* Scrollbars in StudyPilot's own UI: slim, rounded, in StudyPilot's colors */
+/* Scrollbars in CampusPilot's own UI: slim, rounded, in CampusPilot's colors */
 :is(.sp-card, .sp-x-panel) ::-webkit-scrollbar, .sp-x-body::-webkit-scrollbar, .sp-card .sp-list::-webkit-scrollbar { width: 10px; height: 10px; }
 :is(.sp-card, .sp-x-panel) ::-webkit-scrollbar-track, .sp-x-body::-webkit-scrollbar-track, .sp-card .sp-list::-webkit-scrollbar-track { background: transparent; }
 :is(.sp-card, .sp-x-panel) ::-webkit-scrollbar-thumb, .sp-x-body::-webkit-scrollbar-thumb, .sp-card .sp-list::-webkit-scrollbar-thumb {

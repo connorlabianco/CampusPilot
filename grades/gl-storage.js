@@ -1,6 +1,6 @@
-// StudyPilot storage adapter for Grade Ledger: saved results live in chrome.storage.local ("gl").
+// CampusPilot storage adapter for Grade Ledger: saved results live in chrome.storage.local ("gl").
 window.GradeLedgerStorage = {
-  label: "Saved in StudyPilot",
+  label: "Saved in CampusPilot",
   async list() {
     const { gl = [] } = await chrome.storage.local.get("gl");
     return gl.sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));

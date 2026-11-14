@@ -34,12 +34,13 @@ function shuffleOptions(q) {
  * questions: bank records; mode: practice | review | exam | weak | cards | mastery | assessment
  * versions: other versions of these questions (mastery mode retries a missed question in different words)
  */
-export async function startSession(questions, { mode = "practice", title = "Practice", timed = false, quizId = null, versions = [], onDone = null } = {}) {
+// demo: the tour's sample quiz. Works like a real one, but nothing is saved; onClose runs when it's closed.
+export async function startSession(questions, { mode = "practice", title = "Practice", timed = false, quizId = null, versions = [], onDone = null, demo = false, onClose = null } = {}) {
   if (!questions.length) { toast("No questions to practice yet.", { error: true }); return; }
   lastFocus = document.activeElement;
   CHECKLISTS = (await chrome.storage.local.get("checklists")).checklists || {};
   S = {
-    mode, title, quizId, versions, onDone, retried: new Set(), help: {}, ui: {},
+    mode, title, quizId, versions, onDone, demo, onClose, retried: new Set(), help: {}, ui: {},
     list: questions.map(prep), i: 0, results: [], picked: null, revealed: false, typed: "",
     exam: mode === "exam" || mode === "assessment", cards: mode === "cards", started: Date.now(), times: {}, shownAt: Date.now(),
     endsAt: timed ? Date.now() + Math.max(5, Math.round(questions.length * 1.5)) * 6e4 : null,
@@ -53,7 +54,9 @@ export async function startSession(questions, { mode = "practice", title = "Prac
 
 function close() {
   if (S?.timer) clearInterval(S.timer);
+  const after = S?.onClose;
   S = null;
+  if (after) setTimeout(after, 0);
   $("#runner").hidden = true;
   document.body.classList.remove("running");
   state.bank = null;
@@ -80,7 +83,7 @@ function header() {
   return h("div", { class: "rn-head" },
     h("button", { class: "ghost", "aria-label": "Close practice", title: "Close (Esc)", onclick: confirmClose }, icon("close", 20)),
     h("div", { class: "grow" }, h("b", {}, S.title), h("div", { class: "meta" },
-      S.mode === "assessment" ? "Assessment: results at the end" : S.exam ? "Exam mode: answers at the end" : S.cards ? "Flashcards" : S.mode === "mastery" ? "Lecture mastery: missed ones come back" : S.mode === "testout" ? "Quick check: what you get right counts as learned" : S.mode === "review" ? "Spaced review" : S.quizId ? "Quiz" : "Practice")),
+      S.demo ? "Sample quiz: nothing here is saved" : S.mode === "assessment" ? "Assessment: results at the end" : S.exam ? "Exam mode: answers at the end" : S.cards ? "Flashcards" : S.mode === "mastery" ? "Lecture mastery: missed ones come back" : S.mode === "testout" ? "Quick check: what you get right counts as learned" : S.mode === "review" ? "Spaced review" : S.quizId ? "Quiz" : "Practice")),
     S.endsAt ? h("span", { class: "pill clock", "aria-label": "Time left" })
       : S.i < S.list.length ? h("button", { class: "pill clock", title: TIMER_HIDDEN ? "Show the time" : "Time so far. Click to hide it (it's still shown at the end).", onclick: async () => { TIMER_HIDDEN = !TIMER_HIDDEN; await chrome.storage.local.set({ timerHidden: TIMER_HIDDEN }); drawClock(); } }) : null,
     h("span", { class: "pill" }, `${Math.min(S.i + 1, S.list.length)} / ${S.list.length}`));
@@ -209,6 +212,7 @@ function record(grade, extra = {}) {
   const res = { id: q.id, grade, topic: q.topic, prompt: q.prompt, ...extra };
   const at = S.results.findIndex((r) => r.id === q.id);
   if (at >= 0) S.results[at] = res; else S.results.push(res);
+  if (grade && S.demo) return; // the sample quiz: nothing is saved
   if (grade) {
     const updated = schedule(q, grade);
     S.list[S.i] = { ...updated, _order: q._order, _setup: q._setup, _inst: q._inst };
@@ -265,9 +269,9 @@ export async function openLecture(q, page = null) {
   const items = cl ? allItems(cl.cl).filter((it) => q.items?.includes(it.id)) : [];
   const slide = page || q.slide || items.flatMap((it) => it.slides || [])[0] || 1;
   const key = await docKeyFor(q);
-  if (!key) return toast("StudyPilot can't find this lecture right now. Open it from the Lectures tab.", { error: true });
+  if (!key) return toast("CampusPilot can't find this lecture right now. Open it from the Lectures tab.", { error: true });
   const note = items.map((it) => it.text).join(" · ").slice(0, 400);
-  // If this lecture is already open in a StudyPilot tab, jump that tab to the slide instead of opening another.
+  // If this lecture is already open in a CampusPilot tab, jump that tab to the slide instead of opening another.
   const tabId = await new Promise((resolve) => {
     const ch = new BroadcastChannel("studypilot-viewer");
     const t = setTimeout(() => { ch.close(); resolve(null); }, 350);
@@ -338,7 +342,7 @@ function summary(box) {
     const p = list.reduce((a, r) => a + (r.grade === "right" ? 1 : r.grade === "partial" ? 0.5 : 0), 0) / list.length;
     return { t, p, n: list.length };
   }).sort((a, b) => a.p - b.p);
-  if (!S.saved && graded.length) {
+  if (!S.saved && graded.length && !S.demo) {
     S.saved = true;
     const courseIds = [...new Set(S.list.map((q) => q.courseId))];
     saveSession({ at: Date.now(), courseId: courseIds[0], courseIds, mode: S.quizId ? "quiz" : S.mode, title: S.title, total: graded.length, score, topics: topicRows, ms: Date.now() - S.started, perQuestion: S.list.filter((q) => S.times[q.id] != null).map((q) => ({ id: q.id, ms: S.times[q.id], type: q.type })) }).catch(() => {});
@@ -374,7 +378,7 @@ function summary(box) {
     timeCard,
     weak.length && !S.list.some((q) => q.v === 2) ? h("div", { class: "note" }, "Review next: ", weak.map((w) => w.topic).join(", ")) : null,
     h("div", { class: "actions" },
-      missed.length ? h("button", { class: "btn secondary", onclick: () => startSession(missed.map(({ _order, _setup, _inst, _retry, ...q }) => q), { mode: S.cards ? "cards" : "practice", title: `${S.title}: missed` }) }, "Redo missed") : null,
+      missed.length ? h("button", { class: "btn secondary", onclick: () => startSession(missed.map(({ _order, _setup, _inst, _retry, ...q }) => q), { mode: S.cards ? "cards" : "practice", title: `${S.title}: missed`, demo: S.demo, onClose: S.onClose }) }, "Redo missed") : null,
       S.quizId ? h("button", { class: "btn secondary", onclick: () => { const { quizId, title, list } = S; startSession(shuffled(list.map(({ _order, ...q }) => q)), { title, quizId }); } }, "Retake") : null,
       h("button", { class: "btn", "data-autofocus": true, onclick: close }, "Done"))));
   box.querySelector("[data-autofocus]")?.focus();

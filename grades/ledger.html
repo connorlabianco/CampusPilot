@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Grade Ledger</title>
+<title>What-If calculator</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
 <link rel="stylesheet" href="grade-ledger.css">
@@ -13,13 +13,13 @@
 <div class="grade-ledger" id="grade-ledger">
 <div class="wrap">
   <header>
-    <h1>Grade Ledger</h1>
+    <h1>What-If calculator</h1>
     <p class="lede">Weighted grade calculator with percentage, letter and points grades. Save any calculation and reopen it later.</p>
   </header>
 
   <section class="sheet" aria-labelledby="calc-h">
     <div class="hdr">
-      <h2 id="gl-calc-h">Grade calculator</h2>
+      <h2 id="gl-calc-h">What-If calculator</h2>
       <div class="seg" role="group" aria-label="Grade type">
         <button type="button" data-mode="percent" aria-pressed="true">Percentage</button>
         <button type="button" data-mode="letter" aria-pressed="false">Letters</button>
@@ -105,7 +105,7 @@
   </section>
 </div>
 </div>
-<!-- StudyPilot: storage adapter must load before grade-ledger.js (see README). -->
+<!-- CampusPilot: storage adapter must load before grade-ledger.js (see README). -->
 <script src="gl-storage.js"></script>
 <script src="grade-ledger.js"></script>
 <script src="ledger-host.js"></script>

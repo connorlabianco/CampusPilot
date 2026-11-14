@@ -2,7 +2,7 @@
 import { download } from "../lib/dl.js";
 import { DEFAULT_LOOK, FONTS } from "../lib/look.js";
 import { icon } from "../lib/icons.js";
-import { providerOf } from "../lib/ai.js";
+import { providerOf, PROVIDERS } from "../lib/ai.js";
 
 export const $ = (s) => document.querySelector(s);
 export const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -30,7 +30,12 @@ export function send(type, payload) {
 
 let toastTimer;
 export function toast(text, { error = false, ms = 5000, action = null } = {}) {
+  if (error) import("../lib/errlog.js").then((m) => m.logError("panel:message", text)).catch(() => {});
+  // Every error message offers to report it (prefilled), unless it already has its own button.
+  if (error && !action && !state.worker) action = { label: "Report", run: () => import("./report.js").then((m) => m.openReport({ kind: "bug", text: `CampusPilot said: "${text}"\n\nWhat I was doing: ` })) };
   const t = $("#toast");
+  // Shown in the top layer, above any open sheet or dialog (re-shown so it's above the newest one).
+  try { if (t.popover) { if (t.matches(":popover-open")) t.hidePopover(); t.showPopover(); } } catch { /* older Chrome: under dialogs */ }
   t.textContent = text; t.classList.toggle("error", error); t.classList.add("show");
   if (action) t.append(" ", h("button", { class: "toast-act", onclick: async () => { t.classList.remove("show"); await action.run(); } }, action.label));
   clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("show"), ms);
@@ -55,10 +60,10 @@ export async function copyText(text) {
   if (!ok) throw new Error("Couldn't copy. Use Download instead.");
 }
 
-// Single files go into Downloads › StudyPilot, never loose in Downloads.
+// Single files go into Downloads › CampusPilot, never loose in Downloads.
 export async function downloadText(name, text, type = "text/markdown") {
   const url = URL.createObjectURL(new Blob([text], { type }));
-  const id = await download(url, `StudyPilot/${name}`, { conflictAction: "uniquify" });
+  const id = await download(url, `CampusPilot/${name}`, { conflictAction: "uniquify" });
   setTimeout(() => URL.revokeObjectURL(url), 60000);
   return id;
 }
@@ -76,7 +81,8 @@ export const safeFile = (n) => {
 export function relDue(iso, a) {
   const d = new Date(iso), diff = d - Date.now();
   const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  if (diff < 0 && a?.kind === "tool") return { text: `Turned in on ${String(a.kind_label || "").replace(/^submitted on /, "") || "the tool"}?`, tone: "maybe", title: "Canvas doesn't see work turned in on outside sites until it's graded. Connect Gradescope (Settings › Connections) so StudyPilot can check." };
+  if (diff < 0 && a?.gs === "open") return { text: "Not turned in", tone: "late", title: `Gradescope shows nothing turned in yet (checked ${new Date(a.gsAt || Date.now()).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}).` };
+  if (diff < 0 && a?.kind === "tool") { const tool = String(a.kind_label || "").replace(/^submitted on /, "") || "the outside site"; return { text: "Past due", tone: "maybe", title: /gradescope/i.test(tool) ? "Canvas doesn't see work turned in on Gradescope until it's graded. With Gradescope on in Settings › Connections, CampusPilot checks Gradescope itself." : `Turned in on ${tool}? Canvas can't see it until it's graded. Mark it done once you have.` }; }
   if (diff < 0 && a?.kind === "offline") return { text: "Past due", tone: "maybe", title: "Handed in on paper or elsewhere, so Canvas can't tell whether it's done." };
   if (diff < 0) return { text: "Overdue", tone: "late" };
   const start = new Date(); start.setHours(0, 0, 0, 0);
@@ -90,9 +96,9 @@ export function relDue(iso, a) {
 // ---------- state ----------
 export const state = {
   settings: {}, snapshot: null, gcal: { connected: false },
-  tab: "today", course: null, courseSub: "overview",
+  tab: "today", course: null, courseSub: "lectures",
   lectureCache: {}, lectureFilter: "new", libraryStats: null,
-  pending: null, imported: null, handoff: null, planSessions: null, attachOffer: null,
+  pending: null, imported: null, handoff: null, attachOffer: null,
   bank: null, // all questions (loaded lazily)
   jup: {}, // per hub: { status, scan, links }
 };
@@ -106,7 +112,8 @@ export function toggle(title, sub, checked, onChange) {
   return h("label", { class: "switch" }, h("span", {}, h("b", {}, title), sub ? h("small", {}, sub) : null),
     h("input", { type: "checkbox", role: "switch", checked: !!checked, onchange: (e) => onChange(e.target.checked, e) }));
 }
-export const ai = () => providerOf(state.settings);
+// state.aiOverride: one request sent to a website other than the usual one (Gemini's site when the key can't be used).
+export const ai = () => (state.aiOverride && PROVIDERS[state.aiOverride] ? { id: state.aiOverride, ...PROVIDERS[state.aiOverride] } : providerOf(state.settings));
 
 // ---------- views & navigation ----------
 export const views = {};
@@ -128,7 +135,62 @@ export function rerender() {
   const root = $(`#${state.tab}`);
   Promise.resolve(views[state.tab]?.(root)).catch((e) => toast(e.message, { error: true }));
 }
-export const openCourse = (id, sub = "overview") => go("courses", { course: id, courseSub: sub });
+// ---------- bringing what was just opened into view ----------
+// Like a chat jumping to the newest reply: when something expands, scroll just enough to show it, as much as fits,
+// never past its title. Works in the panel and inside sheets.
+function scrollBox(el) {
+  for (let p = el.parentElement; p; p = p.parentElement) {
+    const o = getComputedStyle(p).overflowY;
+    if ((o === "auto" || o === "scroll") && p.scrollHeight > p.clientHeight + 1) return p;
+  }
+  return document.scrollingElement;
+}
+export function reveal(el, { pad = 12 } = {}) {
+  if (!el?.isConnected || !el.getClientRects().length) return;
+  const box = scrollBox(el);
+  const whole = box === document.scrollingElement;
+  const area = whole ? { top: 0, bottom: innerHeight } : box.getBoundingClientRect();
+  // sticky things at the top of that area (the tabs, a course's sub-tabs, a sheet's title bar) cover part of it
+  let cover = area.top;
+  // (where they'll sit once the page has scrolled: their sticky offset plus their height)
+  for (const s of (whole ? document : box).querySelectorAll(whole ? ".tabs, .subtabs" : ".sheet-head")) {
+    const r = s.getBoundingClientRect(), cs = getComputedStyle(s);
+    if (r.height && cs.position === "sticky") cover = Math.max(cover, area.top + (parseFloat(cs.top) || 0) + r.height);
+  }
+  const top = cover + pad, bottom = area.bottom - pad;
+  const r = el.getBoundingClientRect();
+  let dy = 0;
+  if (r.top < top) dy = r.top - top;
+  else if (r.bottom > bottom) dy = Math.min(r.bottom - bottom, r.top - top);
+  if (Math.abs(dy) < 2) return;
+  const calm = document.documentElement.classList.contains("reduce-motion") || matchMedia("(prefers-reduced-motion: reduce)").matches;
+  (whole ? window : box).scrollBy({ top: dy, behavior: calm ? "auto" : "smooth" });
+}
+/** Waits for something that's about to appear (after a redraw), lets it settle, then brings it into view. */
+export function revealSoon(find, { timeout = 2000 } = {}) {
+  const start = performance.now();
+  let last = -1, still = 0;
+  const tick = () => {
+    const el = typeof find === "function" ? find() : document.querySelector(find);
+    if (el?.isConnected) {
+      const hgt = el.getBoundingClientRect().height;
+      still = Math.abs(hgt - last) < 1 ? still + 1 : 0; last = hgt;
+      if (still >= 3 || performance.now() - start > timeout) return reveal(el);
+    } else if (performance.now() - start > timeout) return;
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+// Any <details> the student opens (Settings groups, "Advanced", folder lists…). Only their own click or key counts:
+// a redraw that recreates an already-open one must not move the page.
+let summaryAt = 0;
+// (A "⋯" menu is a <details> too, but opening one never needs scrolling.)
+for (const ev of ["click", "keydown"]) document.addEventListener(ev, (e) => { const s = e.target.closest?.("summary"); if (s && !s.closest(".menu")) summaryAt = performance.now(); }, true);
+document.addEventListener("toggle", (e) => {
+  if (e.target.tagName === "DETAILS" && e.target.open && performance.now() - summaryAt < 600) revealSoon(() => e.target);
+}, true);
+
+export const openCourse = (id, sub = "lectures") => go("courses", { course: id, courseSub: sub });
 
 // ---------- settings / look ----------
 export function currentLook() {
@@ -149,6 +211,9 @@ export function applyA11y() {
   root.classList.toggle("readable", !!s.readableFont);
   root.classList.toggle("contrast", !!s.highContrast);
   root.classList.toggle("reduce-motion", !!s.reduceMotion);
+  // The "?" button: explanations shown (blue) or hidden (gray)
+  root.classList.toggle("no-help", s.showHelp === false);
+  document.getElementById("helpBtn")?.setAttribute("aria-pressed", String(s.showHelp !== false));
 }
 export const panelIsDark = () => {
   const t = document.documentElement.dataset.look;
@@ -165,12 +230,35 @@ export async function saveSettings(patch, quiet = true) {
 
 // ---------- Canvas data ----------
 export async function sync(btn) {
-  const b = btn || $("#syncBtn");
-  b.classList.add("spinning");
+  const b = btn || $("#syncBtn"); // (the top bar's refresh button is gone; Home's "Refresh" passes its own)
+  b?.classList.add("spinning");
   try { state.snapshot = await send("SYNC"); state.lectureCache = {}; toast("Canvas is up to date", { ms: 2000 }); }
   catch (e) { toast(e.message, { error: true, ms: 8000 }); }
-  finally { b.classList.remove("spinning"); }
+  finally { b?.classList.remove("spinning"); }
   rerender();
+}
+
+// Right after a connection is turned on (Gradescope allowed, or a course ticked in Settings): refresh Canvas, then
+// check what's turned in on Gradescope (following each course's Gradescope link in Canvas once, so courses whose
+// names don't match are found too), and redraw. Turned-in work leaves the list without a manual refresh.
+let connecting = null;
+export function refreshAfterConnect(kind = "gradescope") {
+  if (connecting) return connecting;
+  connecting = (async () => {
+    toast(kind === "jupyter" ? "Connected. Reading the course's notebooks…" : "Connected. Checking what you've turned in on Gradescope…", { ms: 15000 });
+    try {
+      state.snapshot = (await send("SYNC").catch(() => null)) || state.snapshot;
+      state.lectureCache = {}; state.gsCache = {};
+      if (kind === "gradescope") {
+        const snap = await send("GS_RECHECK", { force: true, linkFromCanvas: true }).catch(() => null);
+        if (snap?.courses) state.snapshot = snap;
+        const r = snap?.gsLastCheck;
+        const done = (r?.courses || []).reduce((a, c) => a + (c.turnedIn || 0), 0);
+        toast(r?.state === "login" ? "Log in to Gradescope once, then CampusPilot can see what you've turned in." : r?.state === "ok" ? `Gradescope checked: ${done} turned-in item${done === 1 ? "" : "s"} found. Your list is up to date.` : "Connected. Your list is up to date.", { ms: 7000 });
+      } else toast("Connected. Your courses are up to date.", { ms: 5000 });
+    } finally { connecting = null; rerender(); }
+  })();
+  return connecting;
 }
 
 // Courses the student hid (clubs, trainings, advising pages) stay out of everything.
@@ -202,23 +290,11 @@ export async function lecturesFor(courseId, { fresh = false } = {}) {
 
 // Canvas often serves file contents from a separate storage host; reading (not just downloading) needs access to it.
 export async function askFileHostAccess() {
-  const origins = ["https://*.amazonaws.com/*", "https://*.instructure-uploads.com/*"];
+  const origins = ["https://*.amazonaws.com/*", "https://*.instructure-uploads.com/*", "https://*.inscloudgate.net/*"];
   if (await chrome.permissions.contains({ origins }).catch(() => false)) return true;
   return chrome.permissions.request({ origins }).catch(() => false);
 }
 
-export async function readActiveTab() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id || !/^https?:/.test(tab.url || "")) throw new Error("Open a Canvas page first.");
-  if (/\/quizzes(\/|$)|\/assessments?\/|quiz-lti|\/external_tools\//i.test(tab.url)) throw new Error("That's a quiz or external tool page, so StudyPilot won't read it.");
-  const [{ result }] = await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    func: () => (document.querySelector("#content, main, [role=main], article") || document.body).innerText.slice(0, 150000),
-  }).catch(() => { throw new Error("Can't read this tab. Try a Canvas page."); });
-  if (!result || result.trim().length < 50) throw new Error("This page doesn't have much text to send.");
-  const kind = /\/assignments\/\d+/.test(tab.url) ? "assignment" : /\/pages\//.test(tab.url) ? "lecture page" : "page";
-  return { title: tab.title, url: tab.url, text: result, kind };
-}
 
 // ---------- Video speed (applies to lecture videos on Canvas and your video site) ----------
 export function speedControl({ compact = false } = {}) {
@@ -227,21 +303,24 @@ export function speedControl({ compact = false } = {}) {
   const toPos = (r) => Math.log(r / MIN) / Math.log(MAX / MIN), fromPos = (x) => MIN * Math.pow(MAX / MIN, x);
   const snap = (r) => (r < 2 ? Math.round(r * 20) / 20 : r < 4 ? Math.round(r * 4) / 4 : Math.round(r * 2) / 2);
   const clamp = (r) => Math.round(Math.min(MAX, Math.max(MIN, Number(r) || 1)) * 100) / 100;
-  const num = h("input", { type: "number", min: MIN, max: MAX, step: 0.05, "aria-label": "Video speed", class: "sp-num" });
-  const sl = h("input", { type: "range", min: 0, max: 1, step: 0.001, "aria-label": "Video speed slider", class: "grow" });
+  // One slider (fine steps at normal speeds, coarser up to 16x), the value beside it, and Reset. Arrow keys nudge it.
+  const sl = h("input", { type: "range", min: 0, max: 1, step: 0.001, "aria-label": "Video speed", class: "grow" });
+  const val = h("output", { class: "speed-val", "aria-live": "polite" });
+  const reset = h("button", { class: "btn small soft", title: "Back to normal speed" }, "Reset");
   let rate = 1;
-  const show = (r) => { rate = r; num.value = String(r); sl.value = toPos(r); };
+  const show = (r) => { rate = r; sl.value = toPos(r); sl.setAttribute("aria-valuetext", `${r}×`); val.textContent = `${r}×`; reset.disabled = r === 1; };
   const set = (r) => { show(clamp(r)); chrome.storage.local.set({ videoSpeed: rate }); };
   chrome.storage.local.get("videoSpeed").then(({ videoSpeed }) => show(clamp(videoSpeed || 1)));
   sl.oninput = (e) => set(snap(fromPos(Number(e.target.value))));
-  num.onchange = (e) => set(e.target.value);
+  sl.onkeydown = (e) => {
+    const d = { ArrowRight: 1, ArrowUp: 1, ArrowLeft: -1, ArrowDown: -1 }[e.key];
+    if (!d) return;
+    e.preventDefault(); set(d > 0 ? rate + stepAt(rate) + 1e-9 : rate - stepAt(rate - 1e-9));
+  };
+  reset.onclick = () => set(1);
   return h("div", { class: "speed" + (compact ? " compact" : "") },
     compact ? h("span", { class: "speed-label" }, "Speed") : null,
-    h("button", { class: "btn small soft", "aria-label": "Slower", onclick: () => set(rate - stepAt(rate - 1e-9)) }, "−"),
-    num, h("span", { class: "x" }, "×"),
-    h("button", { class: "btn small soft", "aria-label": "Faster", onclick: () => set(rate + stepAt(rate) + 1e-9) }, "+"),
-    sl,
-    h("button", { class: "btn small soft", onclick: () => set(1) }, "1×"));
+    sl, val, reset);
 }
 
 // Big downloads (over 200 MB) ask first and say how big they are.

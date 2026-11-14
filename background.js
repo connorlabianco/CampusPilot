@@ -2,16 +2,15 @@ import { CanvasClient, stripHtml, hash } from "./lib/canvas.js";
 import * as lib from "./lib/library.js";
 import { allQuestions } from "./lib/quiz.js";
 import { formatOf } from "./lib/extract.js";
-import { isLocked } from "./lib/safety.js";
+import { isLocked, isBlockedAssignment } from "./lib/safety.js";
 import { openWork } from "./lib/packs.js";
 import * as gcal from "./lib/gcal.js";
-import { parsePlan } from "./lib/planparse.js";
 import * as hubApi from "./lib/jupyterhub.js";
-import { isGitPullLink, nbToMarkdown, hubFromLink, knownHubs, hubForCourse, nbCellsText, nbProblemText, notebookData, summarizeData, notebookDirs, prettyNotebook } from "./lib/jupyter.js";
+import { isGitPullLink, nbToMarkdown, hubFromLink, jupyterHint, knownHubs, hubForCourse, nbCellsText, nbProblemText, notebookData, summarizeData, notebookDirs, prettyNotebook } from "./lib/jupyter.js";
+import { connOn, migrateConn } from "./lib/conn.js";
 import { timeSnippets, weekEvents, mondayOf, addDays, ymd, emptyWeek } from "./lib/schedule.js";
 import { planDays, planInfo } from "./lib/planner.js";
 import { download, waitForDownload } from "./lib/dl.js";
-import { icsBusy } from "./lib/ical.js";
 import { parseSyllabusWeights } from "./lib/grades.js";
 import * as gs from "./lib/gradescope.js";
 import { diffSnapshots, diffExams, addChanges } from "./lib/changes.js";
@@ -20,8 +19,10 @@ import * as searchLib from "./lib/search.js";
 import { collectExams } from "./lib/exams.js";
 import * as vids from "./lib/videos.js";
 import * as gsync from "./lib/sync.js";
+import { logError } from "./lib/errlog.js";
+import { toolsIn } from "./lib/tools.js";
 
-// Keep StudyPilot's downloads in their "StudyPilot/…" folders. Without this, another downloads
+// Keep CampusPilot's downloads in their "CampusPilot/…" folders. Without this, another downloads
 // extension or the server's suggested name can override the path and files land loose in Downloads.
 chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
   if (item.byExtensionId !== chrome.runtime.id) { suggest(); return; }
@@ -36,7 +37,7 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
 
 export const DEFAULT_SETTINGS = {
   canvasUrl: "", canvasToken: "",
-  studyStart: "09:00", studyEnd: "22:00", maxHoursPerDay: 4, sessionMinutes: 60, daysAhead: 14, notes: "",
+  daysAhead: 14,
   // Canvas page enhancements
   dashTodo: true, cardBadges: true, darkMode: false, hideDone: true, lectureButtons: true,
   replaceTodo: true, replaceFeedback: true,
@@ -50,8 +51,8 @@ export const DEFAULT_SETTINGS = {
   // Lecture library: courses synced automatically, and courses whose originals are also mirrored to Downloads
   libraryCourses: [], libraryMirror: [],
   moduleLayout: {}, masteryLevel: {}, // per course: Lectures-tab arrangement; what "mastered" means
-  // Calendar feed (private iCal link) for busy times without Google sign-in; courses hidden from StudyPilot
-  icalUrl: "", hiddenCourses: [],
+  // Courses hidden from CampusPilot
+  hiddenCourses: [],
   // Canvas look (see lib/look.js); empty = defaults
   look: null,
   // v5: your AI (any chat assistant, by copy and paste), quiz defaults, notebooks per course
@@ -124,7 +125,7 @@ async function downloadVideoFiles(list, onEach = () => {}) {
     const url = vids.podcastUrl(s.videoHost, v.video_id);
     if (!allowed[v.video_id]) { notAllowed++; continue; }
     try {
-      const id = await download(url, `StudyPilot/${safeName(v.course)}/Lecture videos/${v.date ? v.date.slice(0, 10) + " " : ""}${safeName(v.title).slice(0, 80)}.mp4`, { conflictAction: "uniquify" });
+      const id = await download(url, `CampusPilot/${safeName(v.course)}/Lecture videos/${v.date ? v.date.slice(0, 10) + " " : ""}${safeName(v.title).slice(0, 80)}.mp4`, { conflictAction: "uniquify" });
       const st = await waitForDownload(id, 6 * 3600e3);
       if (st === "complete") done++; else failed++;
     } catch { failed++; }
@@ -133,7 +134,7 @@ async function downloadVideoFiles(list, onEach = () => {}) {
   return { done, notAllowed, failed, total: list.length };
 }
 
-// The student can remove a wrong exam date or add one StudyPilot missed.
+// The student can remove a wrong exam date or add one CampusPilot missed.
 function applyExamEdits(courseId, list, edits = {}) {
   const key = (e) => `${e.title}|${e.date.slice(0, 10)}`;
   const removed = new Set(edits.removed || []);
@@ -143,14 +144,54 @@ function applyExamEdits(courseId, list, edits = {}) {
 
 // Does this Canvas course use Gradescope? (a Gradescope tab, Gradescope assignments, or a Gradescope link in modules)
 async function courseUsesGradescope(courseId) {
+  return !!(await gradescopeIn(courseId)).uses;
+}
+// How a Canvas course uses Gradescope: { uses, canvasLink } where canvasLink is the course menu's Gradescope item
+// (an external tool). Following that link signs the student into exactly the right Gradescope course.
+async function gradescopeIn(courseId) {
   const { snapshot } = await chrome.storage.local.get("snapshot");
   const course = snapshot?.courses.find((x) => x.id === courseId);
-  if ((course?.assignments || []).some((a) => /gradescope/i.test(a.kind_label || ""))) return true;
   const c = await client();
   const tabs = await c.optional(`/courses/${courseId}/tabs`, {}, { all: false }).catch(() => null);
-  if ((tabs || []).some((t) => /gradescope/i.test(t.label || ""))) return true;
+  const tab = (tabs || []).find((t) => /gradescope/i.test(t.label || "") && !t.hidden);
+  const canvasLink = tab ? new URL(tab.html_url || tab.full_url || "", c.baseUrl).href : null;
+  if (canvasLink) return { uses: true, canvasLink };
+  if ((course?.assignments || []).some((a) => /gradescope/i.test(a.kind_label || ""))) return { uses: true, canvasLink: null };
   const mods = await c.optional(`/courses/${courseId}/modules`, { "include[]": "items", per_page: 50 }).catch(() => null);
-  return (mods || []).some((m) => (m.items || []).some((i) => /gradescope/i.test(`${i.title} ${i.external_url || ""} ${i.url || ""}`)));
+  const item = (mods || []).flatMap((m) => m.items || []).find((i) => /gradescope/i.test(`${i.title} ${i.external_url || ""} ${i.url || ""}`));
+  return { uses: !!item, canvasLink: item?.type === "ExternalTool" && item.html_url ? item.html_url : null };
+}
+// Opens the course's Gradescope link from Canvas in a background tab and watches where it lands. Canvas signs the
+// student in to their own Gradescope course, so the course is known exactly (no name matching, no separate login).
+async function gradescopeFromCanvas(courseId, link) {
+  const tab = await chrome.tabs.create({ url: link, active: false });
+  const opened = new Set();
+  try {
+    // Gradescope may load in the tab itself, inside Canvas's tool frame, or in a new tab it opens: look in all three.
+    const RE = /^https:\/\/www\.gradescope\.com\/courses\/(\d+)/;
+    let gsId = null;
+    for (let i = 0; i < 45 && !gsId; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const urls = [];
+      const t = await chrome.tabs.get(tab.id).catch(() => null);
+      if (!t) break;
+      urls.push(t.url || t.pendingUrl || "");
+      const frames = await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, func: () => location.href }).catch(() => []);
+      urls.push(...frames.map((f) => f.result || ""));
+      for (const k of await chrome.tabs.query({}).catch(() => [])) if (k.openerTabId === tab.id) { opened.add(k.id); urls.push(k.url || k.pendingUrl || ""); }
+      gsId = urls.map((u) => (u.match(RE) || [])[1]).find(Boolean) || null;
+    }
+    if (!gsId) {
+      // It stopped somewhere else (a Gradescope sign-in or account-link page): show it so the student can finish.
+      await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+      return { needsYou: true };
+    }
+    for (const id of [tab.id, ...opened]) chrome.tabs.remove(id).catch(() => {});
+    const s = await settings();
+    await actions.SAVE_SETTINGS({ gradescopeMap: { ...(s.gradescopeMap || {}), [courseId]: gsId } });
+    await chrome.storage.session.remove("gsStatus");
+    return { gsId };
+  } catch (e) { chrome.tabs.remove(tab.id).catch(() => {}); throw e; }
 }
 // Which Gradescope course goes with a Canvas course: the student's pick, else a match by code or name.
 async function gsLinkFor(courseId, gsCourses) {
@@ -194,7 +235,7 @@ async function searchChunks() {
   for (const c of courses) {
     const cdocs = await lib.docsForCourse(c.id).catch(() => []);
     for (const d of cdocs) { docs++; list.push(...searchLib.docChunks(d, { course: c.code || c.name })); }
-    // Module items StudyPilot hasn't read yet are still findable by title and module name.
+    // Module items CampusPilot hasn't read yet are still findable by title and module name.
     const items = cl ? await moduleItems(cl, c.id) : [];
     const have = new Set(cdocs.map((d) => d.key));
     for (const l of items) if (!have.has(l.doc_key)) { unread++; list.push({ kind: "Module", courseId: c.id, course: c.code || c.name, title: l.title, url: l.url, where: l.module, key: l.doc_key, text: `${l.title}\n${l.module}` }); }
@@ -237,38 +278,214 @@ async function recordChanges(fresh) {
 // What's been turned in on Gradescope, per Canvas course, so "Overdue" isn't shown for work that was handed in there.
 async function rememberTurnedIn(courseId, list) {
   const { gsSubmitted = {}, snapshot } = await chrome.storage.local.get(["gsSubmitted", "snapshot"]);
-  gsSubmitted[courseId] = { at: Date.now(), keys: gs.turnedIn(list) };
+  const items = gs.gsItems(list);
+  const pairs = await pairWithGemma(courseId, snapshot, items, list).catch(() => gsSubmitted[courseId]?.pairs || {});
+  gsSubmitted[courseId] = { at: Date.now(), keys: gs.turnedIn(list), open: gs.notTurnedIn(list), items, pairs };
   await chrome.storage.local.set({ gsSubmitted });
   if (snapshot) { gs.applyTurnedIn(snapshot, gsSubmitted); gs.applyMarked(snapshot, (await settings()).doneItems); await chrome.storage.local.set({ snapshot }); await updateBadge(snapshot); }
 }
-// In the background (at most every 3 hours): re-check courses that have Gradescope work due soon or past due
-// and not turned in according to Canvas. Only when Gradescope is connected and logged in.
-async function checkTurnedIn() {
-  const { snapshot, gsSubmitted = {}, gsCheckAt = 0 } = await chrome.storage.local.get(["snapshot", "gsSubmitted", "gsCheckAt"]);
-  if (!snapshot || Date.now() - gsCheckAt < 3 * 3600e3 || !(await gs.hasGsPermission())) return;
-  const map = (await settings()).gradescopeMap || {};
-  const usesGs = (c) => map[c.id] ? map[c.id] !== "none" : c.assignments.some((a) => /gradescope/i.test(a.kind_label || ""));
-  const soon = (a) => a.due_at && !a.submitted && (a.kind === "tool" || a.kind === "offline") && Math.abs(Date.parse(a.due_at) - Date.now()) < 7 * 864e5;
-  const ids = snapshot.courses.filter((c) => usesGs(c) && c.assignments.some(soon)).map((c) => c.id);
-  await chrome.storage.local.set({ gsCheckAt: Date.now() });
-  if (!ids.length) return;
-  const st = await gs.status().catch(() => null);
-  if (st?.state !== "ok") return;
-  for (const id of ids) {
-    const link = await gsLinkFor(id, st.courses);
-    if (!link) continue;
-    const list = await gs.assignments(link.id).catch(() => null);
-    if (list) await rememberTurnedIn(id, list.assignments);
+// Canvas assignments the name and due-time rules couldn't match to a Gradescope assignment: Gemma pairs them (only
+// assignment names and due dates are sent). Asked once per assignment; the answers are kept with the course's check.
+async function pairWithGemma(courseId, snapshot, items, list) {
+  const { gsSubmitted = {}, gsPairAsked = {} } = await chrome.storage.local.get(["gsSubmitted", "gsPairAsked"]);
+  const pairs = { ...(gsSubmitted[courseId]?.pairs || {}) };
+  const s = await settings();
+  if (s.aiProvider !== "gemini-key") return pairs;
+  const c = snapshot?.courses.find((x) => x.id === courseId);
+  const asked = new Set(gsPairAsked[courseId] || []);
+  const todo = (c?.assignments || []).filter((a) => !a.submitted && /gradescope/i.test(a.kind_label || "") && !pairs[a.id] && !asked.has(a.id) && !gs.matchItem(a, items));
+  if (!todo.length || !items.length) return pairs;
+  const gsList = list.map((g, i) => ({ i, name: g.name, due: g.due || null }));
+  const text = `Match each Canvas assignment to the Gradescope assignment that is the same piece of work, or null if none is. Names are often written differently ("Week 7 problems" vs "Problem Set 7"); due dates usually match. Never pair different numbers (HW 3 is not HW 30).\n\nCanvas assignments:\n${todo.map((a) => JSON.stringify({ id: a.id, name: a.name, due: a.due_at })).join("\n")}\n\nGradescope assignments:\n${gsList.map((g) => JSON.stringify(g)).join("\n")}\n\nReply with ONLY this JSON: {"pairs":[{"canvas":<id>,"gradescope":<i or null>}]}`;
+  const { generate } = await import("./lib/gemini.js");
+  const reply = (await generate([{ role: "user", parts: [{ text }] }], { kind: "small", json: true })).text;
+  const o = JSON.parse((reply.match(/\{[\s\S]*\}/) || ["{}"])[0]);
+  for (const p of o.pairs || []) {
+    const a = todo.find((x) => String(x.id) === String(p.canvas));
+    const g = Number.isInteger(p.gradescope) ? list[p.gradescope] : null;
+    if (a && g) pairs[a.id] = gs.gsItems([g])[0].k;
   }
+  gsPairAsked[courseId] = [...asked, ...todo.map((a) => a.id)].slice(-400);
+  await chrome.storage.local.set({ gsPairAsked });
+  return pairs;
+}
+// Is work on the to-do list already turned in on Gradescope? Checked for every course with Gradescope on: every
+// 15 minutes while anything is open, right after you submit (see the Gradescope tab watcher), and when the panel opens.
+// Every check is written down (gsLastCheck) so Settings › Connections can say exactly what happened.
+async function checkTurnedIn({ force = false, linkFromCanvas = false } = {}) {
+  const note = (o) => chrome.storage.local.set({ gsLastCheck: { at: Date.now(), ...o } });
+  const { snapshot, gsCheckAt = 0 } = await chrome.storage.local.get(["snapshot", "gsCheckAt"]);
+  if (!snapshot) return;
+  const s = await settings();
+  const on = snapshot.courses.filter((c) => connOn(s, "gradescope", c.id) && (s.gradescopeMap || {})[c.id] !== "none");
+  if (!on.length) return note({ state: "off" });
+  if (!(await gs.hasGsPermission())) return note({ state: "permission" });
+  const age = (a) => (a.due_at ? Date.now() - Date.parse(a.due_at) : 0);
+  const open = (a) => !a.submitted && age(a) < 21 * 864e5 && age(a) > -21 * 864e5;
+  const ids = on.filter((c) => c.assignments.some(open)).map((c) => c.id);
+  if (!force && Date.now() - gsCheckAt < 15 * 60e3) return;
+  if (force && !linkFromCanvas && Date.now() - gsCheckAt < 60e3) return; // the panel asking twice in a row
+  await chrome.storage.local.set({ gsCheckAt: Date.now() });
+  if (!ids.length) return note({ state: "ok", courses: [] });
+  const st = await gs.status().catch((e) => ({ state: "error", error: e.message }));
+  if (st?.state === "login") return note({ state: "login" });
+  if (st?.state !== "ok") return note({ state: "error", error: st?.error || "Couldn't reach Gradescope." });
+  const report = [];
+  for (const id of ids) {
+    const c = snapshot.courses.find((x) => x.id === id);
+    let link = await gsLinkFor(id, st.courses);
+    // Not matched by name: follow the course's own Gradescope link in its Canvas menu once (when you asked to check).
+    if (!link && linkFromCanvas) {
+      const { canvasLink } = await gradescopeIn(id).catch(() => ({}));
+      const r = canvasLink ? await gradescopeFromCanvas(id, canvasLink).catch(() => null) : null;
+      if (r?.gsId) link = { id: r.gsId, short: "" };
+    }
+    if (!link) { report.push({ courseId: id, course: c?.code || c?.name, linked: false }); continue; }
+    try {
+      const list = await gs.assignments(link.id);
+      await rememberTurnedIn(id, list.assignments);
+      const { snapshot: after } = await chrome.storage.local.get("snapshot");
+      const cc = after?.courses.find((x) => x.id === id);
+      const still = (cc?.assignments || []).filter((a) => open(a) && !a.submitted);
+      const items = gs.gsItems(list.assignments);
+      report.push({ courseId: id, course: c?.code || c?.name, gsName: link.short || link.name || "", linked: true, found: list.assignments.length,
+        turnedIn: items.filter((x) => x.done).length, unmatched: still.filter((a) => !gs.matchItem(a, items)).map((a) => a.name).slice(0, 6) });
+    } catch (e) { report.push({ courseId: id, course: c?.code || c?.name, linked: true, error: e.message }); }
+  }
+  await note({ state: "ok", courses: report });
+}
+
+// Does this course use Jupyter? Looks everywhere a course mentions it: its Canvas menu (a "JupyterHub" or "DataHub"
+// tab, often next to Gradescope or Grades), modules, assignments, the syllabus, the front page, the course's
+// pages and announcements. Collects every hub address it sees, most-linked first.
+async function jupyterScan(courseId) {
+  const c = await client();
+  const hubs = new Map();
+  let found = false;
+  const see = (url, text = "") => {
+    const h = jupyterHint(url, text);
+    if (h === null) return;
+    found = true;
+    if (h) hubs.set(h, (hubs.get(h) || 0) + 1);
+  };
+  const scanHtml = (html) => {
+    const s = String(html || "");
+    for (const m of s.matchAll(/<a\b[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi)) see(m[1].replace(/&amp;/g, "&"), m[2].replace(/<[^>]+>/g, " "));
+    const plain = s.replace(/<[^>]+>/g, " ");
+    if (/jupyter\s*hub|jupyterhub|datahub|jupyter notebook/i.test(plain)) found = true;
+    // "To sync content: https://tinyurl.com/…": a short link to a notebook sync link
+    if (/\bsync\b[^.]{0,40}(tinyurl\.com|bit\.ly|tiny\.cc|rb\.gy|is\.gd|t\.ly)\//i.test(plain) || /(tinyurl\.com|bit\.ly|tiny\.cc)\/[^\s"]*(sync|lab|hub|jupyter|nb)/i.test(s)) found = true;
+  };
+  const [tabs, mods, asg, course, front, pages, news] = await Promise.all([
+    c.optional(`/courses/${courseId}/tabs`, {}, { all: false }).catch(() => null),
+    c.modules(courseId).catch(() => null),
+    c.assignments(courseId).catch(() => []),
+    c.optional(`/courses/${courseId}`, { "include[]": "syllabus_body" }, { all: false }).catch(() => null),
+    c.optional(`/courses/${courseId}/front_page`, {}, { all: false }).catch(() => null),
+    c.optional(`/courses/${courseId}/pages`, { per_page: 50, "include[]": "body" }, { all: false }).catch(() => null),
+    c.announcements([courseId], 120).catch(() => []),
+  ]);
+  let canvasLink = null; // a Canvas menu tab or module item that launches the hub (the address shows only once opened)
+  for (const tb of tabs || []) if (!tb.hidden && /jupyter|datahub|notebook/i.test(tb.label || "")) { found = true; canvasLink ||= tb.html_url ? new URL(tb.html_url, c.baseUrl).href : null; }
+  for (const m of mods || []) for (const i of m.items || []) {
+    if (i.external_url) see(i.external_url, i.title || "");
+    if (i.type === "ExternalTool" && /jupyter|datahub/i.test(i.title || "") && i.html_url) { found = true; canvasLink ||= i.html_url; }
+    if (/jupyter|datahub|\.ipynb\b/i.test(i.title || "")) found = true;
+  }
+  for (const a of asg || []) { if (!isBlockedAssignment(a)) scanHtml(a.description); }
+  scanHtml(course?.syllabus_body); scanHtml(front?.body);
+  for (const pg of pages || []) { scanHtml(pg.body); if (/jupyter|datahub/i.test(pg.title || "")) found = true; }
+  for (const a of news || []) scanHtml(a.message);
+  return { found, canvasLink, hubs: [...hubs].sort((a, b) => b[1] - a[1]).map(([hub, links]) => ({ hub, links })) };
+}
+// The course's JupyterHub link in Canvas (a menu tab or a module item) opened in a background tab: wherever it lands
+// is the hub. Like Gradescope's, so no address needs typing.
+async function hubFromCanvas(link) {
+  const tab = await chrome.tabs.create({ url: link, active: false });
+  const opened = new Set();
+  try {
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const urls = [];
+      const t = await chrome.tabs.get(tab.id).catch(() => null);
+      if (!t) break;
+      urls.push(t.url || t.pendingUrl || "");
+      const frames = await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, func: () => location.href }).catch(() => []);
+      urls.push(...frames.map((f) => f.result || ""));
+      for (const k of await chrome.tabs.query({}).catch(() => [])) if (k.openerTabId === tab.id) { opened.add(k.id); urls.push(k.url || k.pendingUrl || ""); }
+      const hub = urls.map((u) => hubFromLink(u)).find(Boolean);
+      if (hub) return { hub };
+    }
+    await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+    return { needsYou: true };
+  } finally { for (const id of opened) chrome.tabs.remove(id).catch(() => {}); }
+}
+
+// Which courses use Gradescope or Jupyter notebooks? Each course is looked at when it first appears and then once a
+// week: Gradescope in its Canvas menu, modules or assignments; Jupyter links in its modules and assignment pages (or
+// a hub already set up for it). Found = on for that course (unless the student unticked it); not found = off.
+const SCAN_V = 4; // raise when the way courses are looked at changes, so every course is looked at again
+let scanning = null;
+function scanConnections(opts) { return (scanning ||= scanConnectionsNow(opts).finally(() => { scanning = null; })); }
+async function scanConnectionsNow({ force = false } = {}) {
+  const { snapshot, connScan = {} } = await chrome.storage.local.get(["snapshot", "connScan"]);
+  if (!snapshot?.courses?.length) return;
+  const s = await settings();
+  if (!s.canvasUrl) return;
+  const c = await client();
+  const WEEK = 7 * 864e5;
+  let changed = false;
+  for (const course of snapshot.courses) {
+    const prev = connScan[course.id];
+    if (!force && prev && prev.v === SCAN_V && Date.now() - prev.at < WEEK) continue;
+    const map = s.gradescopeMap?.[course.id];
+    let gsFound = !!(map && map !== "none") || course.assignments.some((a) => /gradescope/i.test(a.kind_label || ""));
+    if (!gsFound && map !== "none") gsFound = !!(await gradescopeIn(course.id).catch(() => ({})))?.uses;
+    let jupFound = !!hubForCourse(s, course.id) || ((s.jupyterCourseFolders || {})[course.id] || []).length > 0;
+    if (!jupFound) jupFound = !!(await jupyterScan(course.id).catch(() => null))?.found;
+    // Every outside tool the course links to (its menu and modules), for "Your courses also use…" on Home.
+    let tools = [];
+    try {
+      const tabs = await c.optional(`/courses/${course.id}/tabs`, {}, { all: false }).catch(() => null);
+      const mods = await c.optional(`/courses/${course.id}/modules`, { "include[]": "items", per_page: 50 }).catch(() => null);
+      const texts = [...(tabs || []).filter((t) => t.type === "external" && !t.hidden).map((t) => `${t.label} ${t.html_url || ""}`),
+        ...(mods || []).flatMap((m) => m.items || []).filter((i) => i.type === "ExternalUrl" || i.type === "ExternalTool").map((i) => `${i.title} ${i.external_url || ""}`)];
+      tools = toolsIn(texts);
+    } catch { /* next scan */ }
+    connScan[course.id] = { v: SCAN_V, at: Date.now(), gradescope: gsFound, jupyter: jupFound, tools };
+    changed = true;
+  }
+  if (!changed && s.connFound) return;
+  await chrome.storage.local.set({ connScan });
+  const ids = (kind) => snapshot.courses.filter((x) => connScan[x.id]?.[kind]).map((x) => x.id);
+  await actions.SAVE_SETTINGS({ connFound: { gradescope: ids("gradescope"), jupyter: ids("jupyter") } });
 }
 
 // For backups: Canvas courses that have a Gradescope course, if Gradescope is connected and logged in.
 async function gsLinkedCourses(courseIds) {
   if (!(await gs.hasGsPermission())) return [];
+  { const s0 = await settings(); courseIds = courseIds.filter((id) => connOn(s0, "gradescope", id)); }
   const st = await gs.status().catch(() => null);
-  if (st?.state !== "ok") return [];
+  const picks = (await settings()).gradescopeMap || {};
+  if (st?.state !== "ok") return courseIds.filter((id) => picks[id] && picks[id] !== "none").map((id) => ({ courseId: id, gsId: picks[id] }));
   const out = [];
   for (const id of courseIds) { const l = await gsLinkFor(id, st.courses); if (l) out.push({ courseId: id, gsId: l.id }); }
+  return out;
+}
+
+// The course's JupyterHub files (the folders picked for it), from the last scan of its hub.
+async function hubFilesFor(courseIds) {
+  const s = await settings();
+  const { jupyterScans = {} } = await chrome.storage.local.get("jupyterScans");
+  const out = [];
+  for (const id of courseIds) {
+    if (!connOn(s, "jupyter", id)) continue;
+    const hub = hubForCourse(s, id);
+    const folders = (s.jupyterCourseFolders || {})[id] || [];
+    if (!hub || hub === "none" || !folders.length) continue;
+    const files = (jupyterScans[hub]?.files || []).filter((f) => folders.some((t) => f.path === t || f.path.startsWith(t + "/")) && !/\.ipynb_checkpoints\//.test(f.path));
+    if (files.length) out.push({ courseId: id, hub, files });
+  }
   return out;
 }
 
@@ -285,7 +502,7 @@ async function downloadAll(files, label, { onlyNew = true } = {}) {
   let done = 0, failed = 0, skipped = 0, i = 0;
   for (const f of files) {
     i++;
-    const path = ["StudyPilot", safeName(f.course), ...String(f.folder || "").split("/").filter(Boolean).map(safeName), safeName(f.name)].join("/");
+    const path = ["CampusPilot", safeName(f.course), ...String(f.folder || "").split("/").filter(Boolean).map(safeName), safeName(f.name)].join("/");
     const prev = f.key ? downloadIndex[f.key] : null;
     if (onlyNew && prev && prev.version === f.version && prev.path === path && await stillOnDisk(prev.id)) {
       skipped++;
@@ -321,9 +538,19 @@ async function ensureOffscreen() {
 
 async function readFileRemote(file) {
   await ensureOffscreen();
-  const r = await chrome.runtime.sendMessage({ target: "offscreen", type: "EXTRACT", payload: { url: file.url, name: file.name, mime: file.type } });
+  const extract = () => chrome.runtime.sendMessage({ target: "offscreen", type: "EXTRACT", payload: { url: file.url, name: file.name, mime: file.type, id: file.id } });
+  let r = await extract();
+  // Canvas wouldn't hand it over: get it back from Google Drive (sync), then read the saved copy.
+  if (!r?.ok && await gsync.restoreFile(file).catch(() => null)) r = await extract();
   if (!r?.ok) throw new Error(r?.error || "couldn't read the file");
+  driveBackupSoon();
   return r.data;
+}
+// Saved lecture files go to the Google Drive app folder a little after they're saved (sync on only).
+let driveTimer = null;
+function driveBackupSoon(ms = 60e3) {
+  clearTimeout(driveTimer);
+  driveTimer = setTimeout(() => gsync.backupFiles({ max: 15 }).then((r) => { if (r?.more) driveBackupSoon(120e3); }).catch(() => {}), ms);
 }
 
 const fileMeta = (f) => ({ id: f.id, name: f.display_name, url: f.url, size: f.size, type: f["content-type"] || "" });
@@ -335,6 +562,7 @@ const pathKey = (p) => { let h = 2166136261; for (let i = 0; i < p.length; i++) 
 /** The course's lecture notebooks (folders sorted as lecture material), from the last look at its hub. */
 async function hubLectures(courseId) {
   const s = await settings();
+  if (!connOn(s, "jupyter", courseId)) return [];
   const hub = hubForCourse(s, courseId);
   const folders = (s.jupyterCourseFolders || {})[courseId] || [];
   if (!hub || hub === "none" || !folders.length) return [];
@@ -356,6 +584,7 @@ async function hubLectures(courseId) {
 /** Homework notebooks (folders sorted as assignments): problem text and data descriptions, for the study plan. */
 async function hubHomework(courseId) {
   const s = await settings();
+  if (!connOn(s, "jupyter", courseId)) return {};
   const hub = hubForCourse(s, courseId);
   const folders = (s.jupyterCourseFolders || {})[courseId] || [];
   if (!hub || hub === "none" || !folders.length) return { hub: null, notebooks: [], files: [] };
@@ -424,7 +653,7 @@ async function ensureLecture(c, courseId, l) {
     if (existing?.text) return existing;
     const caps = await vids.panoptoCaptions(l.host, [l.video_id]);
     const text = vids.captionsToText(caps[l.video_id]);
-    if (!text) throw new Error(`"${l.title}" has no captions yet, so StudyPilot can't read it.`);
+    if (!text) throw new Error(`"${l.title}" has no captions yet, so CampusPilot can't read it.`);
     const doc = { key, course_id: courseId, kind: "page", video: true, title: l.title, module: l.module || "Lecture videos", version: l.video_id,
       text: `Transcript of the recorded lecture "${l.title}"${l.date ? ` (${new Date(l.date).toLocaleDateString()})` : ""}:\n\n${text}`, images: [], visual: false, url: l.url };
     await lib.putDoc(doc);
@@ -477,6 +706,14 @@ async function syncLibraryCourse(c, courseId, label) {
 }
 
 
+// Gradescope without opening a tab: the hidden page reads it (falls back to a background tab if that doesn't work).
+gs.setQuiet(async (what, id) => {
+  await ensureOffscreen();
+  const r = await chrome.runtime.sendMessage({ target: "offscreen", type: "GS_READ", payload: { what, id } });
+  if (!r?.ok) throw new Error(r?.error || "Gradescope read failed");
+  return r.r;
+});
+
 // ---------- Zips: one archive per course / folder ----------
 async function zipCall(type, payload) {
   await ensureOffscreen();
@@ -488,7 +725,7 @@ async function zipCall(type, payload) {
 const today = () => new Date().toISOString().slice(0, 10);
 
 /**
- * Builds StudyPilot/<name>.zip. items: [{path, url}|{path, text}], plus optional `extra(add)` for streamed sources.
+ * Builds CampusPilot/<name>.zip. items: [{path, url}|{path, text}], plus optional `extra(add)` for streamed sources.
  * Files that can't be fetched are listed in "_Not included.txt" inside the zip and returned in `failed`.
  */
 async function buildZip(name, items, { label = "Zipping", extra = null, note = "", saveAs = false } = {}) {
@@ -514,7 +751,7 @@ async function buildZip(name, items, { label = "Zipping", extra = null, note = "
     }
     const { url, size, count } = await zipCall("ZIP_FINISH", { id });
     await progress({ label: "Saving zip…" });
-    const dlId = await download(url, `StudyPilot/${safeName(name)}.zip`, { conflictAction: "uniquify", saveAs });
+    const dlId = await download(url, `CampusPilot/${safeName(name)}.zip`, { conflictAction: "uniquify", saveAs });
     const state = await waitForDownload(dlId, saveAs ? 60 * 60e3 : undefined);
     zipCall("ZIP_REVOKE", { url }).catch(() => {});
     if (state === "interrupted" && saveAs) throw new Error("Backup not saved (the save window was closed).");
@@ -531,7 +768,7 @@ async function zipIndex() { return (await chrome.storage.local.get("zipIndex")).
 async function saveZipIndex(idx) { await chrome.storage.local.set({ zipIndex: idx }); }
 
 
-// Course files + my submissions → "StudyPilot/<course> - files - <date>.zip" (one per course).
+// Course files + my submissions → "CampusPilot/<course> - files - <date>.zip" (one per course).
 // Anything the zip builder can't fetch is downloaded loose into a clearly named folder instead.
 async function zipCourseFiles(files, { onlyNew = true } = {}) {
   const idx = await zipIndex();
@@ -562,6 +799,17 @@ async function zipCourseFiles(files, { onlyNew = true } = {}) {
 }
 
 // ---------- Actions ----------
+// Where Canvas itself places the student in a course: the Canvas sections they're enrolled in, and their groups in it.
+// Section names that are just the course's own name say nothing, so they're dropped.
+async function canvasPlacement(c, courseId, course, groupsP) {
+  const norm = (x) => String(x || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const same = (n) => [course?.name, course?.code, course?.course_code].some((x) => x && norm(x) === norm(n));
+  const info = await c.optional(`/courses/${courseId}`, { "include[]": "sections" }, { all: false }).catch(() => null);
+  const sections = [...new Set((info?.sections || []).map((x) => x.name).filter((n) => n && !same(n)))].slice(0, 6);
+  const groups = [...new Set(((await groupsP) || []).filter((g) => String(g.course_id) === String(courseId)).map((g) => g.name).filter(Boolean))].slice(0, 8);
+  return { sections, groups };
+}
+
 const actions = {
   async GET_SETTINGS() { return settings(); },
 
@@ -616,7 +864,8 @@ const actions = {
   },
 
   // Re-check Gradescope right now (for plans), so turned-in work isn't planned again.
-  async GS_RECHECK() { await chrome.storage.local.set({ gsCheckAt: 0 }); await checkTurnedIn().catch(() => {}); return (await chrome.storage.local.get("snapshot")).snapshot; },
+  async CONN_SCAN({ force = false } = {}) { await scanConnections({ force }); return (await settings()).connFound || null; },
+  async GS_RECHECK({ force = true, linkFromCanvas = false } = {}) { await checkTurnedIn({ force, linkFromCanvas }).catch(() => {}); const { snapshot, gsLastCheck } = await chrome.storage.local.get(["snapshot", "gsLastCheck"]); return Object.assign(snapshot || {}, { gsLastCheck }); },
 
   // ---------- search across everything ----------
   async SEARCH({ q, courseId = null, limit = 40, fresh = false }) {
@@ -650,6 +899,8 @@ const actions = {
     const hidden = new Set((await settings()).hiddenCourses || []);
     await recordChanges(diffSnapshots(prev, snapshot).filter((c) => !hidden.has(c.courseId))).catch(() => {});
     await updateBadge(snapshot);
+    // New or not-looked-at-this-week courses: see which connections they use (in the background).
+    scanConnections().catch(() => {});
     return snapshot;
   },
 
@@ -734,6 +985,42 @@ const actions = {
     return out;
   },
 
+  // A lecture file saved on this computer (downloaded here, with the file servers' permissions, when the slide viewer
+  // or Gemini couldn't get it themselves).
+  async FILE_SAVE({ file }) {
+    await ensureOffscreen();
+    const save = (f) => chrome.runtime.sendMessage({ target: "offscreen", type: "SAVE_FILE", payload: { url: f.url, name: f.name, mime: f.type, id: f.id } });
+    let r = await save(file);
+    // The saved download link may have expired: ask Canvas for a fresh one and try again.
+    if (!r?.ok && file.id) {
+      const fresh = await (await client()).file(file.id).catch(() => null);
+      if (fresh?.url) r = await save({ ...file, url: fresh.url });
+    }
+    // Canvas won't hand it over: the copy backed up in Google Drive (when sync is on).
+    if (!r?.ok && await gsync.restoreFile(file).catch(() => null)) return { saved: true, fromDrive: true };
+    if (!r?.ok) throw new Error(r?.error || "couldn't save the file");
+    if (r.data?.saved && !r.data.had) driveBackupSoon();
+    return r.data;
+  },
+  // Keeps a copy of every lecture file CampusPilot has read (not videos), a few at a time, so nothing depends on
+  // Canvas handing the file over again later.
+  async FILES_BACKUP({ max = 25 } = {}) {
+    const { snapshot } = await chrome.storage.local.get("snapshot");
+    const lib = await import("./lib/library.js");
+    const fc = await import("./lib/filecache.js");
+    let saved = 0, tried = 0;
+    for (const c of snapshot?.courses || []) {
+      for (const d of await lib.docsForCourse(c.id).catch(() => [])) {
+        const f = d.file;
+        if (d.kind !== "file" || !f?.url || d.video || !fc.keepable(f.name, f.type) || (f.size || 0) > fc.MAX_FILE) continue;
+        if (await fc.hasFile(f)) continue;
+        if (tried++ >= max) { driveBackupSoon(5e3); return { saved, more: true }; }
+        try { if ((await actions.FILE_SAVE({ file: f }))?.saved) saved++; } catch { /* next time */ }
+      }
+    }
+    driveBackupSoon(5e3);
+    return { saved, more: false };
+  },
   async LIBRARY_SYNC({ courseIds } = {}) {
     searchCache = null;
     const s = await settings();
@@ -861,22 +1148,43 @@ const actions = {
       const fileBytes = plans.reduce((n, p) => n + p.items.reduce((m, it) => m + (it.size || 0), 0), 0);
       const videoMinutes = plans.reduce((n, p) => n + p.videos.reduce((m, v) => m + (v.minutes || 0), 0), 0);
       const videoCount = plans.reduce((n, p) => n + p.videos.length, 0);
-      if (estimate) return { bytes: fileBytes, items: plans.reduce((n, p) => n + p.items.length, 0), videoCount, videoMinutes, videoBytes: videoMinutes * VIDEO_BYTES_PER_MIN };
+      const hubSets = await hubFilesFor(plans.map((p) => p.courseId));
+      const gsSets = await gsLinkedCourses(plans.map((p) => p.courseId));
+      const hubBytes = hubSets.reduce((n, h) => n + h.files.reduce((m, f) => m + (f.size || 0), 0), 0);
+      if (estimate) return { bytes: fileBytes + hubBytes, items: plans.reduce((n, p) => n + p.items.length, 0) + hubSets.reduce((n, h) => n + h.files.length, 0), videoCount, videoMinutes, videoBytes: videoMinutes * VIDEO_BYTES_PER_MIN,
+        gradescope: gsSets.length, jupyter: hubSets.length };
       const bytes = plans.reduce((n, p) => n + p.items.reduce((m, it) => m + (it.size || 0), 0), 0);
       const note = (list) => list.filter((p) => p.skipped.length).map((p) => `${p.root}\n${p.skipped.map((x) => `- ${x}`).join("\n")}`).join("\n\n");
-      const head = "Quizzes, tests and outside tools are never opened by StudyPilot, and locked items are skipped. These weren't included:";
-      // Very large backups are split per course so no single zip gets unwieldy.
-      const groups = bytes > 3e9 && plans.length > 1 ? plans.map((p) => [p]) : [plans];
+      const head = "Quizzes, tests and outside tools are never opened by CampusPilot, and locked items are skipped. These weren't included:";
+      // One zip with every course: course-backup-<date>_<time>.zip (safe as a file name everywhere).
+      const groups = [plans];
       const out = [];
+      const d = new Date(), pad = (x) => String(x).padStart(2, "0");
+      const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`;
       for (const g of groups) {
-        const name = g.length === 1 && groups.length > 1 ? `${g[0].label} backup ${today()}` : `Canvas backup ${today()}`;
+        const name = `course-backup-${stamp}`;
         const items = g.flatMap((p) => p.items);
         const n = note(g);
-        const gsCourses = await gsLinkedCourses(g.map((p) => p.courseId));
+        const gsCourses = gsSets;
         const s2 = await settings();
         const withTranscripts = transcripts && s2.videoHost && g.some((p) => p.videos.length);
-        const extra = gsCourses.length || withTranscripts ? async (id) => {
+        const extra = gsCourses.length || withTranscripts || hubSets.length ? async (id) => {
           const failed = [];
+          // JupyterHub: the course's notebooks and data, as they are on the hub: <course>/JupyterHub/<path>
+          for (const set of hubSets) {
+            const plan = g.find((p) => p.courseId === set.courseId);
+            const at = `${plan.root}/JupyterHub`;
+            try {
+              const hub = await checkHub(set.hub);
+              const serverBase = await serverFor(hub);
+              const r = await hubApi.streamFiles(hub, serverBase, set.files.map((f) => f.path), {
+                addChunk: (pth, b64) => zipCall("ZIP_CHUNK", { id, path: `${at}/${pth}`, b64 }),
+                commit: (pth) => zipCall("ZIP_COMMIT", { id, path: `${at}/${pth}`, date: set.files.find((f) => f.path === pth)?.last_modified }),
+                onProgress: (i, n2) => progress({ label: `${plan.label}: JupyterHub files`, done: i, total: n2 }),
+              });
+              failed.push(...r.failed.map((x) => ({ path: `${at}/${x.path}`, error: x.error })));
+            } catch (e) { failed.push({ path: at, error: `JupyterHub: ${e.message}` }); }
+          }
           // Lecture video transcripts as text files: <course>/Lecture videos/<date> <title>.txt
           if (withTranscripts) for (const p of g) {
             const list = p.videos;
@@ -911,7 +1219,7 @@ const actions = {
         out.push({ name: z.name, count: z.count, failed: z.failed.length, size: z.size, downloadId: z.downloadId });
       }
       // Video files are already compressed and very large, so they're saved as they are (not zipped),
-      // in Downloads › StudyPilot › <course> › Lecture videos, and only when the video site allows downloads.
+      // in Downloads › CampusPilot › <course> › Lecture videos, and only when the video site allows downloads.
       let videos = null;
       if (videoFiles) videos = await downloadVideoFiles(plans.flatMap((p) => p.videos.map((v) => ({ ...v, course: p.label }))));
       backupPlanCache = null;
@@ -924,7 +1232,9 @@ const actions = {
     const { syncAccount = null, syncState = null } = await chrome.storage.local.get(["syncAccount", "syncState"]);
     return { ready: gsync.oauthReady(), account: syncAccount, state: syncState };
   },
-  async SYNC_SIGN_IN() { const account = await gsync.signIn(); const r = await gsync.syncNow(); return { account, state: r }; },
+  async SYNC_SIGN_IN() { const account = await gsync.signIn(); const r = await gsync.syncNow(); driveBackupSoon(10e3); return { account, state: r }; },
+  async DRIVE_FILES_INFO() { const m = await gsync.driveFiles(); return { count: m.size, bytes: [...m.values()].reduce((a, f) => a + f.size, 0) }; },
+  async DRIVE_FILES_CLEAR() { await gsync.clearDriveFiles(); return true; },
   async SYNC_SIGN_OUT() { await gsync.signOut(); return true; },
   async SYNC_NOW() { return gsync.syncNow(); },
 
@@ -1062,7 +1372,7 @@ const actions = {
   // Study plan: homework notebooks on the course's hub that match these assignments by name ("hw03.ipynb" ↔
   // "Homework 3"): their problem text (never the student's code or outputs) and a description of the data they use.
   async JUPYTER_HOMEWORK({ courseId, assignments }) {
-    const { hub, files, notebooks } = await hubHomework(courseId);
+    const { hub, files, notebooks = [] } = await hubHomework(courseId);
     if (!hub || !notebooks.length) return {};
     const key = (s) => gs.workKey(s).replace(/\b0+(\d)/g, "$1");
     const out = {}, want = [];
@@ -1086,12 +1396,37 @@ const actions = {
     }
     return out;
   },
+  // Class meetings some schools put on the Canvas calendar: the last three weeks and the next three (My week turns
+  // the ones that repeat weekly into suggestions).
+  async CALENDAR_CLASS_TIMES({ courseIds }) {
+    const c = await client();
+    const start = new Date(Date.now() - 21 * 864e5).toISOString(), end = new Date(Date.now() + 21 * 864e5).toISOString();
+    const out = [];
+    for (let i = 0; i < courseIds.length; i += 10) {
+      const ids = courseIds.slice(i, i + 10);
+      const list = await c.optional("/calendar_events", { type: "event", start_date: start, end_date: end, "context_codes[]": ids.map((id) => `course_${id}`), per_page: 100 }).catch(() => null);
+      for (const e of list || []) out.push({ title: e.title, start_at: e.start_at, end_at: e.end_at, location_name: e.location_name, location_address: e.location_address, context_code: e.context_code });
+    }
+    return out;
+  },
+  // Where Canvas places the student in each course (sections, groups): groups named like a section
+  // ("48210 [Jordan Lee] R 10:00AM ILP 4207") go straight onto My week.
+  async PLACEMENTS({ courseIds }) {
+    const c = await client();
+    const { snapshot } = await chrome.storage.local.get("snapshot");
+    const groupsP = c.optional("/users/self/groups", { context_type: "Course", per_page: 100 }).catch(() => []);
+    const out = {};
+    for (const id of courseIds) out[id] = await canvasPlacement(c, id, snapshot?.courses.find((x) => x.id === id), groupsP).catch(() => ({ sections: [], groups: [] }));
+    return out;
+  },
   // My week: the parts of each course's syllabus and course pages that mention days, times and places
   // (lectures, sections, labs, office hours). The student's AI turns them into class times.
   async CLASS_TIME_SOURCES({ courseIds }) {
     const c = await client();
     const { snapshot } = await chrome.storage.local.get("snapshot");
     const out = [];
+    // Groups the student is in (some courses put each discussion section in its own group).
+    const groupsP = c.optional("/users/self/groups", { context_type: "Course", per_page: 100 }).catch(() => []);
     for (const courseId of courseIds) {
       const course = snapshot?.courses.find((x) => x.id === courseId);
       await progress({ label: `Looking for class times in ${course?.code || "your courses"}` });
@@ -1113,20 +1448,22 @@ const actions = {
           }
         }
         const text = [...new Set(texts.map((t) => timeSnippets(t, { max: 3500 })).filter(Boolean))].join("\n…\n").slice(0, 7000);
-        out.push({ id: courseId, name: course?.name || String(courseId), code: course?.code || "", text });
+        out.push({ id: courseId, name: course?.name || String(courseId), code: course?.code || "", text, canvas: await canvasPlacement(c, courseId, course, groupsP) });
       } catch (e) { out.push({ id: courseId, name: course?.name || String(courseId), code: course?.code || "", text: "", error: e.message }); }
     }
     await progress(null);
     return out;
   },
-  // Canvas calendar page: StudyPilot's study time, planned work and class times for the dates shown (drawn on the
+  // Canvas calendar page: CampusPilot's study time, planned work and class times for the dates shown (drawn on the
   // page only; nothing is written to Canvas).
   async CAL_OVERLAY({ from, to }) {
     const s = await settings();
-    return { on: s.calendarOverlay !== false, events: await weekItems(from, to) };
+    const { plan } = await chrome.storage.local.get("plan");
+    return { on: s.calendarOverlay !== false, clean: s.calendarClean !== false, hasPlan: !!plan?.tasks?.length, events: await weekItems(from, to) };
   },
+  async OPEN_WEEK() { await chrome.tabs.create({ url: chrome.runtime.getURL("week/week.html") }); return true; },
   // Keep My week in Google Calendar: class times and planned study sittings (or study time, without a plan),
-  // for the next two weeks. StudyPilot's own events only; replaced whenever the week or the plan changes.
+  // for the next two weeks. CampusPilot's own events only; replaced whenever the week or the plan changes.
   async GCAL_PUSH_WEEK() {
     const today = ymd(new Date()), to = ymd(addDays(new Date(), 14));
     const items = await weekItems(today, to);
@@ -1136,13 +1473,17 @@ const actions = {
       .filter((e) => Date.parse(`${e.date}T${e.end}:00`) > now)
       .map((e) => ({ summary: e.kind === "study" ? "Study time" : e.kind === "plan" ? `Study: ${e.title}` : e.title, location: e.sub || "",
         start: `${e.date}T${e.start}:00`, end: `${e.date}T${e.end}:00`, colorId: e.kind === "class" ? "8" : "10", quiet: e.kind === "class",
-        description: e.kind === "class" ? "Class time from My week" : "From your StudyPilot study plan" }));
+        description: e.kind === "class" ? "Class time from My week" : "From your CampusPilot study plan" }));
     const n = await gcal.replaceEvents("week", events, Intl.DateTimeFormat().resolvedOptions().timeZone);
     await chrome.storage.local.set({ gcalWeekAt: Date.now() });
     return { count: n };
   },
   async GCAL_REMOVE_WEEK() { return { count: await gcal.removeEvents("week") }; },
-  async CAL_OVERLAY_SET({ on }) { const s = await settings(); await chrome.storage.local.set({ settings: { ...s, calendarOverlay: !!on, settingsUpdatedAt: Date.now() } }); return true; },
+  async CAL_OVERLAY_SET({ on, clean }) {
+    const s = await settings();
+    await chrome.storage.local.set({ settings: { ...s, ...(on == null ? {} : { calendarOverlay: !!on }), ...(clean == null ? {} : { calendarClean: !!clean }), settingsUpdatedAt: Date.now() } });
+    return true;
+  },
   // Check courses whose exam dates haven't been looked at for 3 days (a few at a time).
   async EXAMS_STALE() {
     const { exams = {}, snapshot } = await chrome.storage.local.get(["exams", "snapshot"]);
@@ -1166,16 +1507,16 @@ const actions = {
 
   // ---------- Gradescope (the student's own work, through their Gradescope login) ----------
   async GS_COURSE({ courseId, refresh = false }) {
-    const uses = await courseUsesGradescope(courseId);
-    if (!(await gs.hasGsPermission())) return { uses, state: "permission" };
+    const { uses, canvasLink } = await gradescopeIn(courseId);
+    if (!(await gs.hasGsPermission())) return { uses, canvasLink, state: "permission" };
     let st = refresh ? null : (await chrome.storage.session.get("gsStatus")).gsStatus;
     if (!st || Date.now() - st.at > 10 * 60e3) {
       st = { ...(await gs.status()), at: Date.now() };
       if (st.state === "ok" && st.courses?.length) await chrome.storage.session.set({ gsStatus: st }); // never remember an empty list
     }
-    if (st.state !== "ok") return { uses, state: st.state };
-    const link = await gsLinkFor(courseId, st.courses);
-    if (!link) return { uses, state: "ok", courses: st.courses, gsId: null };
+    const link = await gsLinkFor(courseId, st.courses || []);
+    if (st.state !== "ok" && !(link && (await settings()).gradescopeMap?.[courseId])) return { uses, canvasLink, state: st.state };
+    if (!link) return { uses, canvasLink, state: "ok", courses: st.courses, gsId: null };
     const list = await gs.assignments(link.id);
     await rememberTurnedIn(courseId, list.assignments);
     return { uses, state: "ok", courses: st.courses, gsId: link.id, gsCourse: link, assignments: list.assignments };
@@ -1217,6 +1558,12 @@ const actions = {
     } finally { await progress(null); }
   },
   async GS_LOGIN() { await gs.openLogin(); return true; },
+  async GS_FROM_CANVAS({ courseId }) {
+    if (!(await gs.hasGsPermission())) throw new Error("Connect Gradescope first.");
+    const { canvasLink } = await gradescopeIn(courseId);
+    if (!canvasLink) throw new Error("This course's Canvas menu has no Gradescope link.");
+    return gradescopeFromCanvas(courseId, canvasLink);
+  },
   async GS_DOWNLOAD({ courseId }) {
     const { gsStatus } = await chrome.storage.session.get("gsStatus");
     const link = await gsLinkFor(courseId, gsStatus?.courses || (await gs.status()).courses || []);
@@ -1320,6 +1667,20 @@ const actions = {
     });
   },
 
+  // The start of each item's text (to sort it): read once, kept in the library (so setting it up later is quicker).
+  async LECTURE_SNIPPETS({ courseId, lectures = [] }) {
+    const c = await client();
+    const out = [];
+    for (const l of lectures.slice(0, 20)) {
+      try {
+        if (l.type === "File" && (l.size || 0) > 40e6) { out.push(null); continue; }
+        const d = await ensureLecture(c, courseId, l);
+        out.push({ text: String(d?.text || "").replace(/\s+/g, " ").trim().slice(0, 1500), pages: d?.analysis?.pageCount || d?.cells || null, unit: d?.analysis?.unit || null });
+      } catch { out.push(null); }
+    }
+    return out;
+  },
+
   async MARK_SEEN({ keys }) {
     const { seenLectures = [] } = await chrome.storage.local.get("seenLectures");
     await chrome.storage.local.set({ seenLectures: [...new Set([...seenLectures, ...keys])].slice(-5000) });
@@ -1363,11 +1724,16 @@ const actions = {
   },
   // Which hub does this course use? Looks at the course's modules and assignment pages for Jupyter links (any site).
   async JUPYTER_DETECT({ courseId }) {
-    const c = await client();
-    const links = await c.gitPullLinks(courseId, (u) => !!hubFromLink(u)).catch(() => []);
-    const count = new Map();
-    for (const l of links) { const h = hubFromLink(l.url); count.set(h, (count.get(h) || 0) + 1); }
-    return [...count].sort((a, b) => b[1] - a[1]).map(([hub, links]) => ({ hub, links }));
+    const r = await jupyterScan(courseId);
+    return { hubs: r.hubs, canvasLink: r.canvasLink, found: r.found };
+  },
+  async JUPYTER_FROM_CANVAS({ link }) {
+    const r = await hubFromCanvas(link);
+    if (r.hub) {
+      // close the tab it opened (it's only needed to learn the address)
+      for (const t of await chrome.tabs.query({}).catch(() => [])) if (hubFromLink(t.url || "") === r.hub && !t.active) chrome.tabs.remove(t.id).catch(() => {});
+    }
+    return r;
   },
   async JUPYTER_FIND_LINKS({ hub, courseId }) {
     const s = await settings();
@@ -1499,18 +1865,6 @@ const actions = {
     await chrome.storage.local.remove("gcalEmail");
     return { connected: false };
   },
-  // Busy times from the student's private calendar link (.ics), for planning without Google sign-in.
-  async CAL_FEED_BUSY({ url } = {}) {
-    const s = await settings();
-    const feed = url || s.icalUrl;
-    if (!feed) return [];
-    const res = await fetch(feed, { credentials: "omit", cache: "no-store" });
-    if (!res.ok) throw new Error(res.status === 404 ? "That calendar link didn't work (404). Copy it again from your calendar's settings." : `Calendar link returned ${res.status}.`);
-    const text = await res.text();
-    if (!/BEGIN:VCALENDAR/.test(text)) throw new Error("That link isn't a calendar file. Use the \"secret address in iCal format\" link.");
-    return icsBusy(text, { from: Date.now(), to: Date.now() + s.daysAhead * 864e5, tz: tz() });
-  },
-
   async GCAL_PUSH_DEADLINES() {
     const { snapshot } = await chrome.storage.local.get("snapshot");
     if (!snapshot) throw new Error("Sync Canvas first.");
@@ -1522,14 +1876,42 @@ const actions = {
     }));
     return { count: await gcal.replaceEvents("deadline", events, tz()) };
   },
-  async GCAL_IMPORT_PLAN({ text }) {
-    const sessions = parsePlan(text);
-    const events = sessions.map((s) => ({ summary: `Study: ${s.title}`, description: s.goal, start: s.start, end: s.end }));
-    return { count: await gcal.replaceEvents("session", events, tz()), sessions };
+  async UPDATE_CHECK() {
+    const r = await checkForUpdate();
+    return r; // when one is found, Chrome downloads it and onUpdateAvailable applies it
   },
-  async PARSE_PLAN({ text }) { return parsePlan(text); },
   async GCAL_REMOVE({ kind }) { return { count: await gcal.removeEvents(kind) }; },
 };
+
+// ---------- keep working when the panel closes ----------
+// The side panel says it's open with a "panel" connection (and a message every 20 seconds, which also keeps this
+// service worker awake). When the last one closes while Gemini is working through a list, a small pinned tab takes
+// over (sidepanel.html?worker) and closes itself when the list is done; opening the panel again takes it back.
+const panelPorts = new Set();
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== "panel") return;
+  panelPorts.add(port);
+  closeWorker();
+  port.onMessage.addListener(() => {}); // the panel's heartbeat
+  port.onDisconnect.addListener(() => { panelPorts.delete(port); setTimeout(() => maybeWorker().catch(() => {}), 1500); });
+});
+async function maybeWorker() {
+  if (panelPorts.size) return;
+  const st = await chrome.storage.local.get(["aiPending", "aiQueueRun", "aiQueue", "settings"]);
+  if (st.settings?.aiProvider !== "gemini-key") return; // only Gemini runs without the student pressing Send
+  const busy = !!st.aiPending?.direct || !!(st.aiQueueRun && (st.aiQueue || []).length);
+  if (!busy) return;
+  const { workerTab } = await chrome.storage.session.get("workerTab");
+  if (workerTab && (await chrome.tabs.get(workerTab).catch(() => null))) return;
+  const t = await chrome.tabs.create({ url: chrome.runtime.getURL("sidepanel/sidepanel.html?worker=1"), pinned: true, active: false });
+  await chrome.storage.session.set({ workerTab: t.id });
+}
+async function closeWorker() {
+  const { workerTab } = await chrome.storage.session.get("workerTab");
+  if (!workerTab) return;
+  await chrome.storage.session.remove("workerTab");
+  await chrome.tabs.remove(workerTab).catch(() => {});
+}
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // Must run synchronously inside the click's message handler to keep the user gesture.
@@ -1543,15 +1925,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!fn) return false;
   fn(msg.payload || {})
     .then((data) => sendResponse({ ok: true, data }))
-    .catch((err) => { progress(null); sendResponse({ ok: false, error: err.message || String(err) }); });
+    .catch((err) => { progress(null); logError(`bg:${msg.type}`, err); sendResponse({ ok: false, error: err.message || String(err) }); });
   return true;
 });
+self.addEventListener("unhandledrejection", (e) => logError("bg", e.reason));
+self.addEventListener("error", (e) => logError("bg", e.error || e.message));
 
 chrome.runtime.onInstalled.addListener(async () => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
   chrome.alarms.create("refresh", { periodInMinutes: 120 });
   const { snapshot } = await chrome.storage.local.get("snapshot");
   updateBadge(snapshot);
+  // 5.16: "Badges on course cards" became the two card options under Appearance (grade, what's due).
+  const s = await settings();
+  // 5.18: Gradescope and Jupyter notebooks are optional connections; whoever used them keeps them on.
+  const conn = migrateConn(s, { gsPermission: await gs.hasGsPermission().catch(() => false) });
+  if (conn) await actions.SAVE_SETTINGS({ conn });
+  if (s.cardBadges === false) await actions.SAVE_SETTINGS({ cardBadges: true, look: { ...(s.look || {}), showGrade: false, showDue: false } });
 });
 
 // Video speed also runs inside lecture-video players on other sites: the school's Panopto site, and
@@ -1580,9 +1970,40 @@ chrome.permissions.onAdded.addListener(() => syncSpeedScripts());
 chrome.permissions.onRemoved.addListener(() => syncSpeedScripts());
 chrome.runtime.onStartup?.addListener(() => syncSpeedScripts());
 chrome.runtime.onInstalled.addListener(() => syncSpeedScripts());
+// A brand-new install gets the first-run tour in the panel (sidepanel/tour.js); updates don't.
+chrome.runtime.onInstalled.addListener((d) => { if (d.reason === "install") chrome.storage.local.set({ freshInstall: true }); });
 
 // Sync every 30 minutes, and shortly after anything worth syncing changes on this computer.
 chrome.alarms.create("gsync", { periodInMinutes: 30 });
+chrome.alarms.create("gscheck", { periodInMinutes: 15 }); // turned in on Gradescope? (does nothing unless Gradescope is on)
+// Turned something in on Gradescope? The course page (or the submission page you land on) is read right then,
+// in that same tab, so "Not turned in" disappears without waiting for the next check.
+{
+  const lastRead = new Map();
+  chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
+    if (info.status !== "complete") return;
+    const m = String(tab.url || "").match(/^https:\/\/www\.gradescope\.com\/courses\/(\d+)/);
+    if (!m || Date.now() - (lastRead.get(m[1]) || 0) < 20e3) return;
+    lastRead.set(m[1], Date.now());
+    try {
+      if (!(await gs.hasGsPermission())) return;
+      const { snapshot } = await chrome.storage.local.get("snapshot");
+      const s = await settings();
+      const map = s.gradescopeMap || {};
+      let courseId = Object.keys(map).find((k) => map[k] === m[1]);
+      if (!courseId) {
+        const short = (tab.title || "").replace(/\s*[|·-]\s*Gradescope.*$/i, "").trim();
+        const hit = (snapshot?.courses || []).find((c) => gs.matchCourse(c, [{ id: m[1], short, name: "", term: "" }]));
+        courseId = hit?.id;
+      }
+      if (courseId == null) return;
+      const c = (snapshot?.courses || []).find((x) => String(x.id) === String(courseId));
+      if (!c || !connOn(s, "gradescope", c.id)) return;
+      const list = await gs.assignmentsInTab(tabId, m[1]);
+      if (list?.assignments?.length) await rememberTurnedIn(c.id, list.assignments);
+    } catch {}
+  });
+}
 let syncTimer = null;
 // Google Calendar: My week follows changes (a couple of minutes later, so a burst of edits is one update).
 let gcalWeekTimer = null;
@@ -1670,8 +2091,56 @@ async function newLecturesToList(s) {
   if (add.length) await chrome.storage.local.set({ aiQueue: [...aiQueue, ...add].slice(0, 60) });
 }
 
+// ---------- updates ----------
+// Chrome updates store extensions by itself every few hours. CampusPilot also asks for a check now and then, and
+// applies a downloaded update right away unless something is in progress (a focus round, a request waiting for
+// your AI, a zip being built); then it waits until that's done.
+async function busyNow() {
+  const { focus, aiPending, aiQueueRun } = await chrome.storage.local.get(["focus", "aiPending", "aiQueueRun"]);
+  const { progress: prog } = await chrome.storage.session.get("progress");
+  return (focus && focus.phase && focus.phase !== "idle") || (aiPending && Date.now() - (aiPending.at || 0) < 2 * 3600e3) || !!aiQueueRun || !!prog;
+}
+async function applyUpdateWhenIdle() {
+  const { updateReady } = await chrome.storage.local.get("updateReady");
+  if (!updateReady) return;
+  if (await busyNow()) { chrome.alarms.create("update-apply", { delayInMinutes: 5 }); return; }
+  await chrome.storage.local.set({ updatedFrom: { version: chrome.runtime.getManifest().version, to: updateReady.version, at: Date.now() } });
+  // Open panels and pages reload themselves into the new version (sidepanel/main.js), so nothing is left half-working.
+  chrome.runtime.reload();
+}
+chrome.runtime.onUpdateAvailable.addListener(async (d) => {
+  await chrome.storage.local.set({ updateReady: { version: d.version, at: Date.now() } });
+  applyUpdateWhenIdle();
+});
+async function checkForUpdate() {
+  try { const r = await chrome.runtime.requestUpdateCheck(); return r?.status ? r : { status: Array.isArray(r) ? r[0] : r }; }
+  catch (e) { return { status: "error", error: e.message }; }
+}
+chrome.alarms.create("update-check", { periodInMinutes: 180 });
+chrome.runtime.onStartup.addListener(async () => {
+  setTimeout(() => checkForUpdate(), 60e3);
+  const s = await settings();
+  const conn = migrateConn(s, { gsPermission: await gs.hasGsPermission().catch(() => false) });
+  if (conn) await actions.SAVE_SETTINGS({ conn });
+});
+chrome.runtime.onInstalled.addListener(async (d) => {
+  if (d.reason !== "update") return;
+  const now = chrome.runtime.getManifest().version;
+  if (d.previousVersion && d.previousVersion !== now) await chrome.storage.local.set({ justUpdated: { from: d.previousVersion, to: now, at: Date.now() } });
+  await chrome.storage.local.remove("updateReady");
+});
+
 chrome.alarms.onAlarm.addListener(async (a) => {
   if (a.name === "gsync") { gsync.syncNow().catch(() => {}); return; }
+  if (a.name === "gscheck") {
+    checkTurnedIn().catch(() => {});
+    // Every few hours: keep copies of lecture files read before copies were kept (a few at a time).
+    const { filesBackupAt = 0 } = await chrome.storage.local.get("filesBackupAt");
+    if (Date.now() - filesBackupAt > 4 * 3600e3) { await chrome.storage.local.set({ filesBackupAt: Date.now() }); actions.FILES_BACKUP({ max: 25 }).catch(() => {}); }
+    return;
+  }
+  if (a.name === "update-check") { checkForUpdate(); return; }
+  if (a.name === "update-apply") { applyUpdateWhenIdle(); return; }
   if (a.name === "focus-end") {
     const r = await focusTimer.finishPhase(null, restoreBadge);
     await focusNotify(r?.note);
@@ -1691,6 +2160,7 @@ chrome.alarms.onAlarm.addListener(async (a) => {
   const s = await settings();
   if (!s.canvasUrl) return;
   await actions.SYNC().catch(() => {});
+  await scanConnections().catch(() => {});
   await checkTurnedIn().catch(() => {});
   // Exam dates: refresh any course not checked for 3 days (one per run, so it stays light)
   {

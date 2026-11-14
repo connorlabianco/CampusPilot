@@ -1,8 +1,7 @@
 // Focus timer in the side panel: a timer button in the header, a bar while it runs, and the start sheet.
 // The timer itself runs in the background (lib/focus.js), so closing the panel doesn't stop it.
-import { h, $, send, toast, state, plural, visibleSnapshot, courseName, saveSettings, rerender } from "./core.js";
+import { h, $, send, toast, state, plural, courseName, saveSettings, rerender, toggle } from "./core.js";
 import { PRESETS, leftMs, fmtMin } from "../lib/focus.js";
-import { openWork } from "../lib/packs.js";
 import { icon } from "../lib/icons.js";
 
 let F = { phase: "idle" };
@@ -27,10 +26,12 @@ function chime(up = true) {
   } catch { /* no audio */ }
 }
 
+/** The "Focus timer" button on Today: start one, or jump to the one that's running. */
+export const focusClick = () => (F.phase === "idle" || !$("#focusbar") ? openFocusSheet() : $("#focusbar").scrollIntoView({ block: "nearest" }));
 export async function initFocus() {
   F = (await chrome.storage.local.get("focus")).focus || { phase: "idle" };
   const btn = $("#focusBtn");
-  btn?.addEventListener("click", () => (F.phase === "idle" ? openFocusSheet() : $("#focusbar")?.scrollIntoView({ block: "nearest" })));
+
   chrome.storage.local.onChanged.addListener((ch) => {
     if (!ch.focus) return;
     const prev = F; F = ch.focus.newValue || { phase: "idle" };
@@ -87,15 +88,8 @@ function pct() {
 export async function openFocusSheet(prefill = {}) {
   const dlg = $("#sheet");
   const s = state.settings;
-  const last = F.last || {};
   let preset = PRESETS.find((p) => p.id === (prefill.preset || s.focusPreset)) || PRESETS[2];
   let custom = null;
-  const work = state.snapshot ? openWork(visibleSnapshot(), { daysAhead: 14 }).slice(0, 8) : [];
-  const courses = state.snapshot ? visibleSnapshot().courses : [];
-  const sel = h("select", { id: "focus-what", "aria-label": "What are you working on?" },
-    h("option", { value: "" }, "Just studying"),
-    work.length ? h("optgroup", { label: "Due soon" }, work.map((a) => h("option", { value: `a:${a.course_id}:${a.id}`, selected: prefill.task === a.id }, `${a.name} (${a.course})`))) : null,
-    courses.length ? h("optgroup", { label: "A course" }, courses.map((c) => h("option", { value: `c:${c.id}`, selected: !prefill.task && (prefill.courseId ?? last.courseId) === c.id }, c.code || c.name))) : null);
   const presetBtns = h("div", { class: "presets", role: "radiogroup", "aria-label": "Timer length" });
   const drawPresets = () => presetBtns.replaceChildren(...PRESETS.map((p) => h("button", { role: "radio", "aria-checked": !custom && p.id === preset.id, class: "preset" + (!custom && p.id === preset.id ? " on" : ""),
     onclick: () => { preset = p; custom = null; drawPresets(); } }, h("b", {}, p.label), h("small", {}, p.sub))));
@@ -103,9 +97,7 @@ export async function openFocusSheet(prefill = {}) {
   const fIn = h("input", { type: "number", min: 1, max: 180, value: s.focusCustom?.focus || 30, "aria-label": "Focus minutes", oninput: () => { custom = { focus: Number(fIn.value), brk: Number(bIn.value) }; drawPresets(); } });
   const bIn = h("input", { type: "number", min: 0, max: 60, value: s.focusCustom?.brk ?? 5, "aria-label": "Break minutes", oninput: () => { custom = { focus: Number(fIn.value), brk: Number(bIn.value) }; drawPresets(); } });
   const begin = async () => {
-    const v = sel.value; let label = "", courseId = null, task = null;
-    if (v.startsWith("a:")) { const [, cid, aid] = v.split(":"); const a = work.find((x) => String(x.id) === aid); label = a?.name || ""; courseId = Number(cid); task = Number(aid); }
-    else if (v.startsWith("c:")) { courseId = Number(v.slice(2)); }
+    const label = "", courseId = prefill.courseId ?? null, task = null; // just a timer; an exam's "Focus session" still files its minutes under that course
     const p = custom ? { focus: Math.max(1, Math.min(180, custom.focus || 25)), brk: Math.max(0, Math.min(60, custom.brk || 0)), preset: "custom" } : { focus: preset.focus, brk: preset.brk, preset: preset.id };
     await saveSettings(custom ? { focusCustom: custom } : { focusPreset: preset.id });
     await send("FOCUS_START", { ...p, label, courseId, task });
@@ -116,13 +108,20 @@ export async function openFocusSheet(prefill = {}) {
       toast("Tip: turn on notifications (Settings › Alerts & focus) to hear when time's up even with this panel closed.", { ms: 8000 });
     }
   };
+  const can = await chrome.permissions.contains({ permissions: ["notifications"] }).catch(() => false);
+  const when = h("div", { class: "sheet-sec" }, h("div", { class: "sheet-label" }, "When time's up"),
+    toggle("Chime", "Plays while this panel is open", s.focusSound !== false, (v) => saveSettings({ focusSound: v })),
+    toggle("Notification", can ? "Even with the panel closed" : "Even with the panel closed (asks to allow notifications)", can && s.focusNotify !== false, async (v, e) => {
+      if (v && !(await chrome.permissions.request({ permissions: ["notifications"] }).catch(() => false))) { e.target.checked = false; return; }
+      await saveSettings({ focusNotify: v });
+    }));
   dlg.replaceChildren(h("div", { class: "sheet-in" },
     h("div", { class: "sheet-head" }, h("div", { class: "grow" }, h("b", {}, "Focus timer"), h("div", { class: "meta" }, "Work in short rounds with breaks. It keeps going with this panel closed.")),
       h("button", { class: "ghost", "aria-label": "Close", onclick: () => dlg.close() }, icon("close", 18))),
-    h("div", { class: "sheet-sec" }, h("label", { class: "sheet-label", for: "focus-what" }, "What are you working on?"), sel),
     h("div", { class: "sheet-sec" }, h("div", { class: "sheet-label" }, "How long"), presetBtns,
       h("details", { class: "adv" }, h("summary", {}, "Custom"), h("div", { class: "row" },
         h("label", { class: "grow" }, h("small", {}, "Focus (min)"), fIn), h("label", { class: "grow" }, h("small", {}, "Break (min)"), bIn)))),
+    when,
     h("button", { class: "btn block", onclick: begin }, icon("play", 16), " Start")));
   if (!dlg.open) dlg.showModal();
 }

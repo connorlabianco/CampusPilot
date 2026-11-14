@@ -1,13 +1,14 @@
+import { matchPlaces } from "../places.js";
+import { icon } from "../../lib/icons.js";
 // Settings, grouped: Your AI · Appearance · Canvas pages · Study & quizzes · Connections · Courses · Data & privacy.
-import { h, $, state, views, send, toast, act, ai, plural, visibleSnapshot, courseName, saveSettings, sync, toggle, seg, currentLook, rerender, relDue,
+import { h, $, state, views, send, toast, act, ai, plural, visibleSnapshot, courseName, saveSettings, sync, toggle, seg, currentLook, rerender, revealSoon, relDue,
   shortDate, fmtBytes, downloadText, today, tz, askFileHostAccess, copyText, DAY, speedControl } from "../core.js";
 import { handToAI } from "../aiflow.js";
-import { makeProjectPack } from "./courses.js";
+import { connOn, connPick, connFoundFor } from "../../lib/conn.js";
 import { PROVIDERS } from "../../lib/ai.js";
 import { DEFAULT_LOOK, SWATCHES, THEMES, FONTS, isDarkTheme } from "../../lib/look.js";
 import { openWork, exportPack, exportIsEmpty, PROJECT_INSTRUCTIONS } from "../../lib/packs.js";
 import { deadlinesIcs } from "../../lib/ics.js";
-import { normalizeFeedUrl } from "../../lib/ical.js";
 import { knownHubs } from "../../lib/jupyter.js";
 import { allQuestions, exportBank, importBank, putQuestions, clearPractice, allQuizzes, importQuizzes, putQuizzes } from "../../lib/quiz.js";
 import { canFill, requestFillPermission, hasFillPermission } from "../../lib/autofill.js";
@@ -24,139 +25,182 @@ function field(key, label, type = "text", attrs = {}) {
     h("input", { id, type, value: state.settings[key] ?? "", ...attrs, onchange: (e) => saveSettings({ [key]: type === "number" ? Number(e.target.value) : e.target.value.trim() }, false) })];
 }
 
+// ---- Settings search ----
+// Looks through what's on the Settings page itself (so it can't go out of date): group names, headings, switches,
+// buttons and their descriptions.
+function findSettings(root, q) {
+  const words = String(q || "").toLowerCase().split(/\s+/).filter(Boolean);
+  if (!words.length) return [];
+  const out = [], seen = new Set();
+  for (const g of root.querySelectorAll("details.group")) {
+    const gTitle = g.querySelector(":scope > summary b")?.textContent || "";
+    let sub = "";
+    const cands = [g.querySelector(":scope > summary"), ...g.querySelectorAll(".group-body .subhead, .group-body label.switch, .group-body label.field, .group-body div.field, .group-body button, .group-body summary, .group-body select, .group-body .seg, .group-body b, .group-body p, .group-body .hint, .group-body .note")].filter(Boolean);
+    for (const el of cands) {
+      if (el.classList.contains("subhead")) sub = el.textContent.trim();
+      const text = (el.matches("select") ? el.getAttribute("aria-label") || "" : el.textContent || "").replace(/\s+/g, " ").trim();
+      if (!text || !words.every((w) => text.toLowerCase().includes(w))) continue;
+      if (out.some((o) => o.el.contains(el) && o.el !== g.querySelector(":scope > summary"))) continue;
+      const head = (el.classList.contains("seg") ? el.getAttribute("aria-label") || sub || text : el.querySelector?.("b")?.textContent || text).trim();
+      const title = head.length > 70 ? `${head.slice(0, 68)}…` : head;
+      const where = [gTitle, sub && sub !== title ? sub : ""].filter(Boolean).join(" › ");
+      const key = `${where}|${title}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const inTitle = words.every((w) => head.toLowerCase().includes(w));
+      out.push({ el, group: g, title, where: el.parentElement === g ? "" : where, rank: (el.parentElement === g ? 0 : inTitle ? 1 : 2) });
+    }
+  }
+  return out.sort((a, b) => a.rank - b.rank).slice(0, 12);
+}
+function jumpTo(hit) {
+  hit.group.open = true;
+  for (let d = hit.el.closest("details"); d; d = d.parentElement?.closest("details")) d.open = true;
+  const el = hit.el.parentElement === hit.group ? hit.group : hit.el;
+  setTimeout(() => { el.scrollIntoView({ block: "center", behavior: "smooth" }); el.classList.add("set-found"); setTimeout(() => el.classList.remove("set-found"), 2600); }, 60);
+}
+function showFound(root, box) {
+  const q = (state.settingsFind || "").trim();
+  if (!q) { box.replaceChildren(); return; }
+  const hits = findSettings(root, q);
+  // by other names ("dark mode", "pomodoro"), and features that live outside Settings
+  const places = matchPlaces(q).filter((p) => !/^Settings ›/.test(p.s) || !hits.some((x) => x.rank <= 1)).slice(0, 4);
+  const row = (title, where, fn) => h("button", { class: "set-hit", role: "listitem", onclick: fn }, h("b", {}, title), where ? h("small", {}, where) : null);
+  box.replaceChildren(...[...hits.map((x) => row(x.title, x.where, () => jumpTo(x))), ...places.map((p) => row(p.t, p.s, () => p.run())),
+    !hits.length && !places.length ? h("div", { class: "muted", style: "padding:10px 12px" }, `Nothing in Settings matches “${q}”. The magnifier at the top searches your courses.`) : null].filter(Boolean));
+}
+
 views.settings = async (root) => {
   root.replaceChildren();
   const s = state.settings;
   root.append(h("h2", { class: "page-title" }, "Settings"));
+  // Search: every switch, button and heading in Settings, plus features that live elsewhere (by name).
+  const found = h("div", { class: "set-results", role: "list", "aria-live": "polite" });
+  const findBox = h("input", { type: "search", id: "setSearch", placeholder: "Search settings", "aria-label": "Search settings", autocomplete: "off", value: state.settingsFind || "",
+    oninput: (e) => { state.settingsFind = e.target.value; showFound(root, found); } });
+  root.append(h("div", { class: "set-search" }, icon("search", 16), findBox), found);
+  setTimeout(() => { if (!root.isConnected) return; showFound(root, found); if (state.settingsJump) { const j = state.settingsJump; state.settingsJump = null; const hits = findSettings(root, j), hit = hits.find((x) => x.rank === 1) || hits[0]; if (hit) jumpTo(hit); } }, 350);
 
   // ---- Account & sync ----
   if (state.sync?.ready !== false) root.append(syncGroup()); // hidden in copies without Google sign-in set up
 
   // ---- Your AI ----
   const p = ai();
-  root.append(group("ai", "Your AI", p.id === "none" ? "Copy only" : p.name,
-    h("p", { class: "muted", style: "margin-top:0" }, "StudyPilot opens your AI in a new tab with the request ready. You press Send; quizzes and plans come back here when you copy the reply."),
-    h("div", { class: "ai-grid" }, Object.entries(PROVIDERS).map(([id, x]) =>
+  const gem = h("div", {});
+  import("../aisetup.js").then((m) => m.geminiSettings()).then((el) => gem.replaceChildren(el)).catch(() => {});
+  const direct = p.id === "gemini-key";
+  root.append(group("ai", "Your AI", p.unpicked ? "Not picked yet" : direct ? "Gemini, inside CampusPilot" : p.id === "none" ? "Copy only" : p.name,
+    gem,
+    direct ? toggle("Make study sets by themselves", "Gemini makes the study set for each core (Priority) lecture in the background, most urgent first, using only its careful models; when today's run out, the rest wait for tomorrow. Extra material is up to you.",
+      s.autoSets === true, async (v) => { await saveSettings({ autoSets: v }); if (v) (await import("../autosets.js")).queuePriority(); }) : null,
+    h("div", { class: "subhead" }, "Or use your own AI's website"),
+    h("p", { class: "muted desc", style: "margin-top:0" }, "CampusPilot opens your AI in a new tab with the request ready. You press Send; quizzes and plans come back here by themselves."),
+    h("div", { class: "ai-grid" }, Object.entries(PROVIDERS).filter(([id]) => id !== "gemini-key").map(([id, x]) =>
       h("button", { class: "btn secondary" + (p.id === id ? " on" : ""), "aria-pressed": p.id === id, onclick: async () => {
         const perm = state.settings.aiAutofill !== false && canFill(id) ? requestFillPermission(id) : null; // must start inside the click
         await saveSettings({ aiProvider: id }); await perm; rerender();
       } }, id === "other" ? "Other" : id === "none" ? "Just copy" : x.name))),
     p.id === "other" ? h("div", {}, ...field("aiName", "Name"), ...field("aiUrl", "Address to open", "url", { placeholder: "https://…" })) : null,
     canFill(p.id) ? fillToggle(p) : null,
-    toggle("Pick up replies automatically", "When you come back after copying a reply, StudyPilot reads it from the clipboard. Only while it's waiting for one.", s.aiClipboard !== false, (v) => saveSettings({ aiClipboard: v }))));
-
-  // ---- Appearance ----
-  root.append(group("look", "Appearance", "Theme, colors, text size",
-    h("div", { class: "field" }, "Text size"),
-    seg([["normal", "Normal"], ["large", "Large"], ["xl", "Extra large"]], s.textSize || "normal", async (v) => { await saveSettings({ textSize: v }); rerender(); }, "Text size"),
-    h("div", { style: "height:6px" }),
-    sw("readableFont", "Easy-to-read font", "Atkinson Hyperlegible with extra spacing, helpful for dyslexia"),
-    sw("highContrast", "High contrast", "Stronger colors and borders"),
-    sw("reduceMotion", "Reduce motion", "Turn off animations"),
-    lookCard()));
-
-  // ---- Canvas pages ----
-  root.append(group("canvas", "Canvas pages", "What StudyPilot adds to Canvas",
-    sw("dashTodo", "Due-soon list on the dashboard", "What's due today and this week"),
-    sw("replaceTodo", "Announcements instead of Canvas's To Do", "Recent announcements, unread first"),
-    sw("replaceFeedback", "Recent grades instead of Recent Feedback", "New grades with scores; click to see your submission"),
-    sw("hideDone", "Hide items I check off", "Only affects StudyPilot, not Canvas"),
-    sw("cardBadges", "Badges on course cards", "Your grade and what's due this week"),
-    sw("lectureButtons", "Practice buttons on lectures", "On lecture pages, slides and each module"),
-    h("div", { class: "subhead" }, "Lecture video speed"),
-    toggle("Speed control on videos and audio", "A small control on each lecture video or audio player, 0.25x to 16x. Keys: S slower, D faster, R reset. Changes playback speed only; nothing is skipped.", s.videoSpeedOn !== false, (v) => saveSettings({ videoSpeedOn: v })),
-    speedControl(),
-    toggle("Also on YouTube and Kaltura videos", "For lecture videos hosted there (asks for access to those sites)", !!s.videoSpeedMore, async (v, e) => {
-      if (v && !(await chrome.permissions.request({ origins: ["https://www.youtube.com/*", "https://www.youtube-nocookie.com/*", "https://*.kaltura.com/*"] }).catch(() => false))) { e.target.checked = false; return; }
-      await saveSettings({ videoSpeedMore: v });
-    }),
-    toggle("On every website", "Any video or audio anywhere, including mp3 files opened in a tab (asks for access to all sites; StudyPilot only adds the speed control there)", !!s.videoSpeedEverywhere, async (v, e) => {
-      if (v && !(await chrome.permissions.request({ origins: ["https://*/*", "http://*/*"] }).catch(() => false))) { e.target.checked = false; return; }
-      await saveSettings({ videoSpeedEverywhere: v });
-    }),
-    h("p", { class: "hint" }, s.videoSpeedEverywhere ? "Works on every website. For audio or video files on your computer, also turn on “Allow access to file URLs” for StudyPilot in chrome://extensions." : s.videoHost ? `Works on Canvas and ${s.videoHost}.` : "Works on Canvas. Connect your lecture video site (Connections) to use it there too."),
-    h("p", { class: "hint" }, "Above about 4x, Chrome mutes the sound; 16x is the most Chrome allows.")));
-
-  // ---- Study & quizzes ----
-  root.append(group("study", "Study & quizzes", "Question count, difficulty, study hours",
+    direct ? null : toggle("Pick up replies automatically", "When you come back after copying a reply, CampusPilot reads it from the clipboard. Only while it's waiting for one.", s.aiClipboard !== false, (v) => saveSettings({ aiClipboard: v })),
     h("div", { class: "row" },
       h("div", { class: "grow" }, h("label", { class: "field", for: "set-qc" }, "Questions per request"),
         h("select", { id: "set-qc", onchange: (e) => saveSettings({ quizCount: Number(e.target.value) }) }, [5, 10, 15, 20, 30].map((n) => h("option", { value: n, selected: (s.quizCount || 10) === n }, String(n))))),
       h("div", { class: "grow" }, h("label", { class: "field", for: "set-qd" }, "Difficulty"),
         h("select", { id: "set-qd", onchange: (e) => saveSettings({ quizDifficulty: e.target.value }) },
           [["introductory", "Easier"], ["mixed", "Mixed"], ["exam-level", "Exam-level"]].map(([v, l]) => h("option", { value: v, selected: (s.quizDifficulty || "mixed") === v }, l))))),
-    h("div", { class: "field" }, "For Plan my week"),
-    h("div", { class: "row" }, h("div", { class: "grow" }, field("studyStart", "Start after", "time")), h("div", { class: "grow" }, field("studyEnd", "Stop by", "time"))),
-    h("div", { class: "row" }, h("div", { class: "grow" }, field("maxHoursPerDay", "Max hours/day", "number", { min: 1, max: 12 })),
-      h("div", { class: "grow" }, field("sessionMinutes", "Session (min)", "number", { min: 15, max: 180, step: 15 })),
-      h("div", { class: "grow" }, field("daysAhead", "Plan days", "number", { min: 3, max: 30 }))),
-    h("label", { class: "field", for: "set-notes" }, "Anything your AI should know"),
-    h("textarea", { id: "set-notes", rows: 3, placeholder: "e.g. I work Tue/Thu evenings. My next midterm is on the 18th.", onchange: (e) => saveSettings({ notes: e.target.value }, false) }, s.notes || "")));
+    h("p", { class: "hint" }, "For quizzes your AI writes outside lecture mastery (like practicing where you lost points). Lecture parts size themselves.")));
 
-  // ---- Alerts & focus ----
-  root.append(group("alerts", "Alerts & focus", "Change notifications, focus timer", ...(await alertsSection())));
+  // ---- Appearance ----
+  root.append(group("look", "Appearance", "Theme, colors, text size",
+    lookCard(),
+    h("div", { class: "subhead" }, "Text and accessibility"),
+    h("div", { class: "field", style: "margin-top:0" }, "Text size"),
+    seg([["normal", "Normal"], ["large", "Large"], ["xl", "Extra large"]], s.textSize || "normal", async (v) => { await saveSettings({ textSize: v }); rerender(); }, "Text size"),
+    h("div", { style: "height:6px" }),
+    sw("readableFont", "Easy-to-read font", "Atkinson Hyperlegible with extra spacing, helpful for dyslexia"),
+    sw("highContrast", "High contrast", "Stronger colors and borders"),
+    sw("reduceMotion", "Reduce motion", "Turn off animations")));
 
   // ---- Connections ----
-  root.append(group("connections", "Connections", "Canvas, calendar, Gradescope, videos, JupyterHub",
+  root.append(group("connections", "Connections", "Canvas, Gradescope, Jupyter notebooks, videos, Google Calendar",
     h("div", { class: "subhead" }, "Canvas"),
     ...field("canvasUrl", "Canvas address", "url", { placeholder: "https://yourschool.instructure.com" }),
     h("details", { class: "adv" }, h("summary", {}, "Advanced: access token"),
       h("p", { class: "hint" }, "Only needed if syncing fails while you're logged in. Canvas › Account › Settings › + New Access Token. Stored only in this browser. Never share it."),
       ...field("canvasToken", "Access token", "password")),
     h("button", { class: "btn small soft block", style: "margin-top:8px", onclick: (e) => sync(e.currentTarget) }, "Sync now"),
-    calendarSection(),
-    jupyterSection(),
-    gradescopeSection(),
-    videoSection()));
+    h("p", { class: "hint" }, "Which courses show up: Courses › Edit."),
+    h("div", { class: "subhead" }, "Course tools"),
+    h("p", { class: "hint", style: "margin-top:0" }, "CampusPilot looks at each course in Canvas and turns these on where the course uses them. Courses without them stay uncluttered. Change any course under Courses."),
+    connRow("gradescope", "Gradescope", "Your submitted and graded work, and practice where you lost points", gradescopeSection),
+    connRow("jupyter", "Jupyter notebooks", "Lecture notebooks from your course's JupyterHub to study, plus downloads", jupyterSection),
+    videoSection(),
+    calendarSection()));
 
-  // ---- Courses ----
-  if (state.snapshot) {
-    const hidden = new Set(s.hiddenCourses || []);
-    root.append(group("courses", "Courses", `${state.snapshot.courses.length - hidden.size} shown`,
-      toggle("Only my favorite courses", "The courses you starred in Canvas. If you haven't starred any, your dashboard courses are used.", s.onlyFavorites !== false, async (v) => { await saveSettings({ onlyFavorites: v }); await sync(); }),
-      h("p", { class: "muted" }, "Turn off anything that isn't a class (trainings, advising pages, clubs)."),
-      h("div", { class: "checks" }, state.snapshot.courses.map((c) => h("label", {},
-        h("input", { type: "checkbox", checked: !hidden.has(c.id), onchange: async (e) => {
-          const set = new Set(state.settings.hiddenCourses || []); e.target.checked ? set.delete(c.id) : set.add(c.id);
-          await saveSettings({ hiddenCourses: [...set] });
-        } }),
-        h("span", { class: "grow" }, c.name), h("small", {}, plural(c.assignments.length, "assignment")))))));
-  }
+  // ---- Advanced: everything most students never need to touch ----
+  const { pasteCard } = await import("./practice.js");
+  root.append(group("advanced", "Advanced", "Canvas pages, alerts, your data, privacy",
+    h("div", { class: "subhead" }, "On Canvas pages"),
+    sw("dashTodo", "Due-soon list on the dashboard", "What's due today and this week"),
+    sw("replaceTodo", "Announcements instead of Canvas's To Do", "Recent announcements, unread first"),
+    sw("replaceFeedback", "Recent grades instead of Recent Feedback", "New grades with scores; click to see your submission"),
+    sw("hideDone", "Hide items I check off", "Only affects CampusPilot, not Canvas"),
+    sw("lectureButtons", "Practice buttons on lectures", "On lecture pages, slides and each module"),
+    h("p", { class: "hint" }, "Grades and due counts on course cards are under Appearance › Course cards. Video speed is under Connections › Lecture videos."),
+    h("div", { class: "subhead" }, "Alerts"),
+    ...(await alertsSection()),
+    h("div", { class: "subhead" }, "Your study data"),
+    h("button", { class: "btn small soft block", title: "One file with your lectures, what you miss, your week and your plan, written for an AI to read", onclick: async (e) => {
+      const b = e.currentTarget; b.disabled = true;
+      try { const r = await (await import("../mydata.js")).downloadStudyData(); toast(`Saved ${r.name}. Attach it to a chat with your AI when you want help planning or reviewing.`, { ms: 8000 }); }
+      catch (err) { toast(err.message, { error: true }); } finally { b.disabled = false; }
+    } }, "Export my study data for an AI"),
+    pasteCard(visibleSnapshot()),
+    savedFilesRow(),
+    h("div", { class: "subhead" }, "Data & privacy"),
+    ...dataSection()));
+  // ---- Help & feedback (always visible, not folded) ----
+  root.append(h("div", { class: "card help-card" }, h("div", { class: "row" },
+    h("div", { class: "grow" }, h("b", {}, "Help & feedback"), h("div", { class: "meta desc" }, "Something not working, or an idea? It goes straight to CampusPilot's developer.")),
+    h("button", { class: "btn small", onclick: () => import("../report.js").then((m) => m.openReport()) }, "Report a problem"))));
 
-  // ---- Data & privacy ----
-  root.append(group("data", "Data & privacy", "Backups, background prep, clearing data", ...dataSection()));
+  // ---- Version and updates ----
+  const upd = h("small", { class: "hint" });
+  root.append(h("div", { class: "version-row" }, h("button", { class: "linkish", onclick: () => import("../tour.js").then((m) => m.startTour()) }, "Show the tour")));
+  root.append(h("div", { class: "version-row" }, h("span", {}, `CampusPilot ${chrome.runtime.getManifest().version} · `,
+      h("a", { href: "https://campuspilot.clabianco.fyi/changelog.html", target: "_blank", rel: "noopener" }, "What's new")),
+    h("button", { class: "linkish", onclick: async (e) => {
+      const b = e.currentTarget; b.disabled = true; upd.textContent = "Checking…";
+      const r = await send("UPDATE_CHECK").catch((err) => ({ status: "error", error: err.message }));
+      upd.textContent = r.status === "update_available" ? `Version ${r.version || "new"} found. It installs by itself in a moment (CampusPilot restarts when nothing is in progress).`
+        : r.status === "no_update" ? "You have the latest version."
+        : r.status === "throttled" ? "Chrome already checked recently. It checks on its own every few hours and installs updates automatically."
+        : "Chrome installs updates automatically every few hours. (Copies loaded from a folder don't update.)";
+      b.disabled = false;
+    } }, "Check for updates")), upd);
 };
 
 async function alertsSection() {
   const s = state.settings;
   const can = await chrome.permissions.contains({ permissions: ["notifications"] }).catch(() => false);
   return [
-    h("p", { class: "muted", style: "margin-top:0" }, "Today shows what changed since you last looked: due dates that moved, new work, new grades and exam dates."),
+    h("p", { class: "muted desc", style: "margin-top:0" }, "Home shows what changed since you last looked: due dates that moved, new work, new grades and exam dates."),
     toggle("Notify me about important changes", "A due date moved earlier, new work due within a week, or an exam date changed", can && s.alertsNotify !== false, async (v, e) => {
       if (v && !(await chrome.permissions.request({ permissions: ["notifications"] }).catch(() => false))) { e.target.checked = false; return; }
       await saveSettings({ alertsNotify: v, alertsAsked: true }); rerender();
     }),
     can && s.alertsNotify !== false ? toggle("Also when a grade is posted", "", !!s.alertsGrades, (v) => saveSettings({ alertsGrades: v })) : null,
-    ...focusSettings(can),
+    h("p", { class: "hint" }, "The focus timer's chime and notification are in the timer itself."),
   ].filter(Boolean);
 }
-function focusSettings(can) {
-  const s = state.settings;
-  return [
-    h("div", { class: "subhead" }, "Focus timer"),
-    h("p", { class: "hint", style: "margin-top:0" }, "Start it from the timer button at the top. Focus time is saved per course and shown in Practice."),
-    toggle("Chime when time's up", "Plays while this panel is open", s.focusSound !== false, (v) => saveSettings({ focusSound: v })),
-    can ? toggle("Notification when time's up", "Even with the panel closed", s.focusNotify !== false, (v) => saveSettings({ focusNotify: v })) : null,
-  ];
-}
-
 // Typing the request into the AI's chat box (needs permission for that one site).
 function fillToggle(p) {
   const status = h("small", { class: "hint" });
   const t = toggle("Fill it in for me", `Puts the request and any slides straight into ${p.name}'s chat box. You still check it and press Send.`, state.settings.aiAutofill !== false, async (v, e) => {
     if (v) {
       const ok = await requestFillPermission(p.id);
-      if (!ok) { e.target.checked = false; toast(`Without access to ${p.name}, StudyPilot will copy instead.`); return; }
+      if (!ok) { e.target.checked = false; toast(`Without access to ${p.name}, CampusPilot will copy instead.`); return; }
     }
     await saveSettings({ aiAutofill: v }); rerender();
   });
@@ -164,48 +208,51 @@ function fillToggle(p) {
   return h("div", {}, t, status);
 }
 
+// ---------- Optional connections: a tick to turn each on, then which courses ----------
+// One connection: the courses it's on for. CampusPilot ticks the courses where it found the connection; the student
+// can tick or untick any course, and that choice stays.
+function connRow(kind, title, sub, details) {
+  const st = state.settings;
+  const courses = visibleSnapshot()?.courses || [];
+  const onIds = courses.filter((c) => connOn(st, kind, c.id)).map((c) => c.id);
+  const scanned = Array.isArray(st.connFound?.[kind]);
+  const status = !scanned ? "Looking at your courses…" : onIds.length ? `On for ${onIds.map((id) => courseName(id)).join(", ")}` : "Not found in your courses";
+  const box = h("div", { class: "conn" + (onIds.length ? " on" : ""), "data-kind": kind },
+    h("div", { class: "conn-head" },
+      h("span", { class: "grow" }, h("b", {}, title), h("small", {}, status), h("small", { class: "desc" }, sub))));
+  const list = h("details", { class: "conn-courses" }, h("summary", {}, "Courses"),
+    h("p", { class: "muted desc", style: "margin:4px 0" }, `Ticked automatically for courses where CampusPilot finds ${title} in Canvas. Tick or untick any course; your choice stays.`),
+    h("div", { class: "checks" }, courses.map((c) => h("label", {},
+      h("input", { type: "checkbox", checked: connOn(st, kind, c.id), onchange: async (e) => {
+        const on = e.target.checked;
+        if (on && kind === "gradescope" && !(await chrome.permissions.request({ origins: ["https://www.gradescope.com/*"] }).catch(() => false))) { e.target.checked = false; return; }
+        await saveSettings({ conn: connPick(state.settings, kind, c.id, on) });
+        state.gsCache = {}; state.lectureCache = {}; rerender();
+        if (on) import("../core.js").then((m) => m.refreshAfterConnect(kind)); // refresh and check right away
+      } }),
+      h("span", { class: "grow" }, c.name, connFoundFor(st, kind, c.id) ? h("small", { class: "muted" }, " · found") : null)))),
+    h("button", { class: "linkish", style: "margin-top:6px", onclick: async (e) => { e.currentTarget.disabled = true; e.currentTarget.textContent = "Looking…"; await send("CONN_SCAN", { force: true }).catch(() => {}); await sync().catch(() => {}); rerender(); } }, "Look again"));
+  list.addEventListener("toggle", () => { if (list.open) revealSoon(`.conn[data-kind="${kind}"] .conn-courses`); });
+  box.append(list);
+  if (onIds.length) box.append(h("div", { class: "conn-body" }, details()));
+  return box;
+}
+
 // ---------- Calendar ----------
 function calendarSection() {
-  const s = state.settings;
   const oauthReady = !chrome.runtime.getManifest().oauth2?.client_id?.startsWith("YOUR_");
-  const feed = h("input", { type: "url", id: "icalUrl", placeholder: "https://calendar.google.com/calendar/ical/…/basic.ics", value: s.icalUrl || "", "aria-label": "Private calendar link" });
-  const status = h("div", { class: "hint" }, s.icalUrl ? "Plans work around your busy times from this calendar." : "");
   return h("div", {},
-    h("div", { class: "subhead" }, "Calendar"),
-    h("p", { class: "muted", style: "margin-top:0" }, "So Plan my week works around your classes and work. Paste your calendar's private link once."),
-    h("details", { class: "adv" }, h("summary", {}, "Where do I find it?"),
-      h("ol", { class: "steps-list" },
-        h("li", {}, "Google Calendar on a computer: Settings › click your calendar under “Settings for my calendars”."),
-        h("li", {}, "Scroll to “Integrate calendar” and copy “Secret address in iCal format”."),
-        h("li", {}, "Outlook: Settings › Calendar › Shared calendars › Publish a calendar › ICS link. Apple iCloud: share the calendar publicly and copy the link.")),
-      h("p", { class: "hint" }, "Keep this link private. StudyPilot stores it only in this browser and only reads start and end times, not event names.")),
-    h("label", { class: "field", for: "icalUrl" }, "Private calendar link"), feed,
-    h("div", { class: "actions" },
-      act(s.icalUrl ? "Update" : "Save and test", async () => {
-        let url;
-        try { url = normalizeFeedUrl(feed.value); } catch (err) { throw new Error(err.message || "That doesn't look like a calendar link."); }
-        if (!(await chrome.permissions.request({ origins: [new URL(url).origin + "/*"] }))) throw new Error("StudyPilot needs permission to read that calendar link.");
-        const b = await send("CAL_FEED_BUSY", { url });
-        await saveSettings({ icalUrl: url });
-        status.textContent = `Connected: ${plural(b.length, "busy block")} in the next ${state.settings.daysAhead} days.`;
-      }, { cls: "btn small", busyLabel: "Checking…" }),
-      s.icalUrl ? h("button", { class: "btn small secondary", onclick: async () => { await saveSettings({ icalUrl: "" }); rerender(); } }, "Remove") : null),
-    status,
-    h("div", { class: "field" }, "Google Calendar (adds events for you)"),
-    !oauthReady ? h("p", { class: "hint" }, "Not set up in this copy of StudyPilot. You don't need it: Plan my week and deadlines can give you a calendar file for any app.")
+    h("div", { class: "subhead" }, "Google Calendar"),
+    !oauthReady ? h("p", { class: "hint", style: "margin-top:0" }, "Not set up in this copy of CampusPilot. You don't need it: deadlines and My week can give you a calendar file for any app.")
       : state.gcal.connected
         ? h("div", {}, h("div", { class: "row" }, h("div", { class: "grow" }, "Connected", state.gcal.email ? h("div", { class: "meta" }, state.gcal.email) : null),
             act("Disconnect", async () => { await send("GCAL_DISCONNECT"); state.gcal = { connected: false }; rerender(); }, { cls: "btn small secondary" })),
           h("div", { class: "actions" },
             act("Add deadlines", async () => { const r = await send("GCAL_PUSH_DEADLINES"); toast(`Added ${r.count} deadlines`); }, { cls: "btn small soft", busyLabel: "Adding…" }),
-            act("Remove deadlines", async () => { const r = await send("GCAL_REMOVE", { kind: "deadline" }); toast(`Removed ${r.count} deadline events`); }, { cls: "btn small soft" }),
-            act("Remove sessions", async () => { const r = await send("GCAL_REMOVE", { kind: "session" }); toast(`Removed ${r.count} study sessions`); }, { cls: "btn small soft" })),
-            toggle("Keep My week in Google Calendar", "Your class times and planned study sittings for the next two weeks, updated when your week or plan changes. Only StudyPilot's own events are changed.", !!s.gcalWeekSync, async (v) => {
-              await saveSettings({ gcalWeekSync: v });
-              if (v) { const r = await send("GCAL_PUSH_WEEK"); toast(`Added ${r.count} events to Google Calendar`); }
-              else { const r = await send("GCAL_REMOVE_WEEK"); toast(`Removed ${r.count} StudyPilot events`); }
-            }))
-        : act("Connect Google Calendar", async () => { await send("GCAL_CONNECT"); state.gcal = await send("GCAL_STATUS"); toast("Google Calendar connected"); rerender(); }, { cls: "btn small block", busyLabel: "Opening Google…" }),
+            act("Remove deadlines", async () => { const r = await send("GCAL_REMOVE", { kind: "deadline" }); toast(`Removed ${r.count} deadline events`); }, { cls: "btn small soft" })),
+          h("p", { class: "hint" }, "To keep your class times and study plan in Google Calendar, turn it on in My week."))
+        : h("div", {}, h("p", { class: "muted desc", style: "margin-top:0" }, "Adds your deadlines, class times and planned study to your own calendar. CampusPilot only changes the events it adds."),
+          act("Connect Google Calendar", async () => { await send("GCAL_CONNECT"); state.gcal = await send("GCAL_STATUS"); toast("Google Calendar connected"); rerender(); }, { cls: "btn small block", busyLabel: "Opening Google…" })),
     h("button", { class: "btn small soft block", style: "margin-top:8px", onclick: () => {
       if (!state.snapshot) return toast("Sync Canvas first.", { error: true });
       downloadText(`canvas-deadlines-${today()}.ics`, deadlinesIcs(state.snapshot), "text/calendar"); toast("Open the file to import into any calendar app.");
@@ -216,11 +263,11 @@ function calendarSection() {
 // Each course has its own hub, set on the course's Files page. Here: which hubs are in use, and by which courses.
 function jupyterSection() {
   const s = state.settings;
-  const box = h("div", {}, h("div", { class: "subhead" }, "JupyterHub"));
+  const box = h("div", { style: "margin-top:10px" }, h("div", { class: "field" }, "Hubs"));
   const hubs = knownHubs(s);
   const host = (u) => { try { return new URL(u).host; } catch { return u; } };
   if (!hubs.length) {
-    box.append(h("p", { class: "muted", style: "margin-top:0" }, "For classes with notebooks. Each course can use its own hub: open the course's Files page and StudyPilot finds it from the course's “Open in Jupyter” links, or you type it in once. No password or token needed."));
+    box.append(h("p", { class: "muted desc", style: "margin-top:0" }, "For classes with notebooks. Each course can use its own hub: open the course's Files page and CampusPilot finds it from the course's “Open in Jupyter” links, or you type it in once. No password or token needed."));
     return box;
   }
   const map = s.jupyterHubs || {}, folders = s.jupyterCourseFolders || {};
@@ -240,7 +287,6 @@ function jupyterSection() {
   }
   const extra = h("input", { type: "url", placeholder: "Paste a course “git-pull” link", "aria-label": "Add a course link" });
   box.append(
-    toggle("Get the latest course files first", "Runs your classes' “Open in Jupyter” links before downloading or practicing. Your own edits are kept.", s.jupyterPullFirst !== false, (v) => saveSettings({ jupyterPullFirst: v })),
     h("div", { class: "row" }, h("div", { class: "grow" }, extra), h("button", { class: "btn small secondary", onclick: async () => {
       const url = extra.value.trim();
       let ok = false; try { ok = /git-pull/.test(url) && hubs.some((x) => new URL(url).host === new URL(x).host); } catch { /* not a URL */ }
@@ -256,18 +302,18 @@ function syncGroup() {
   const st = state.sync || {};
   const ago = (t) => { const m = Math.round((Date.now() - t) / 6e4); return m < 1 ? "just now" : m < 60 ? `${m} min ago` : `${Math.round(m / 60)} h ago`; };
   const body = [];
-  if (st.ready === false) body.push(h("p", { class: "muted", style: "margin-top:0" }, "Google sign-in isn't set up in this copy of StudyPilot yet. Whoever installed it needs to add a Google sign-in ID (see SETUP-GOOGLE.md)."));
+  if (st.ready === false) body.push(h("p", { class: "muted", style: "margin-top:0" }, "Google sign-in isn't set up in this copy of CampusPilot yet. Whoever installed it needs to add a Google sign-in ID (see SETUP-GOOGLE.md)."));
   else if (!st.account) body.push(
-    h("p", { class: "muted", style: "margin-top:0" }, "Sign in to keep your quizzes, progress, grade calculators, exam dates and settings the same on every computer where you use Chrome."),
+    h("p", { class: "muted desc", style: "margin-top:0" }, "Sign in to keep everything the same on every computer where you use Chrome: lecture checklists and how well you know them, practice questions and quizzes, My week, your study plan and AI list, What-If calculators, exam dates, settings, and the lecture files CampusPilot has read (not videos)."),
     act("Sign in with Google", async () => { const r = await send("SYNC_SIGN_IN"); state.sync = await send("SYNC_STATUS"); state.bank = null; toast(`Signed in. Synced ${plural(r.state?.questions || 0, "question")}.`); rerender(); }, { cls: "btn block", busyLabel: "Signing in…" }),
-    h("p", { class: "hint" }, "Your data goes to a private StudyPilot folder in your own Google Drive. It doesn't appear in your files, and only StudyPilot can open it. Nothing goes to any other server."));
+    h("p", { class: "hint" }, "Your data goes to a private CampusPilot folder in your own Google Drive. It doesn't appear in your files, and only CampusPilot can open it. Nothing goes to any other server."));
   else body.push(
     h("div", { class: "row" }, h("div", { class: "grow" }, h("b", {}, st.account.email || "Signed in"),
       h("div", { class: "meta" }, st.state?.at ? `Synced ${ago(st.state.at)} · ${plural(st.state.questions || 0, "question")}, ${plural(st.state.quizzes || 0, "quiz", "quizzes")}` : "Not synced yet"))),
     h("div", { class: "actions" },
       act("Sync now", async () => { await send("SYNC_NOW"); state.sync = await send("SYNC_STATUS"); state.bank = null; toast("Synced"); rerender(); }, { cls: "btn small", ico: "refresh", busyLabel: "Syncing…" }),
       act("Sign out", async () => { if (!confirm("Sign out? Your data stays on this computer and in your Drive.")) return; await send("SYNC_SIGN_OUT"); state.sync = await send("SYNC_STATUS"); rerender(); }, { cls: "btn small secondary" })),
-    h("p", { class: "hint" }, "Syncs every 30 minutes, after practice, and when you change settings. Your Canvas access token (if you added one) stays on this computer."));
+    h("p", { class: "hint" }, "Syncs every 30 minutes, after practice, and when anything changes. Lecture files CampusPilot has read (PDFs, slides, documents; never videos) are backed up there too, so your other computers can open them even when Canvas won't. Your Canvas access token (if you added one) and your Gemini key stay on this computer."));
   return group("sync", "Account & sync", st.account ? st.account.email : "Sign in to sync between computers", ...body);
 }
 
@@ -276,7 +322,7 @@ function videoSection() {
   const s = state.settings;
   const box = h("div", {}, h("div", { class: "subhead" }, "Lecture videos"));
   const input = h("input", { type: "text", placeholder: "e.g. yourschool.hosted.panopto.com", value: s.videoHost || "", "aria-label": "Panopto address" });
-  box.append(h("p", { class: "muted", style: "margin-top:0" }, "If your classes are recorded in Panopto (sometimes under a school name), StudyPilot can read the captions so recorded lectures work like slides."),
+  box.append(h("p", { class: "muted desc", style: "margin-top:0" }, "If your classes are recorded in Panopto (sometimes under a school name), CampusPilot can read the captions so recorded lectures work like slides."),
     h("div", { class: "row" }, h("div", { class: "grow" }, input),
       act("Find it", async () => { const r = await send("VIDEO_DETECT"); if (r.host) { input.value = r.host; toast(`Found ${r.host}`); } else toast("No Panopto links found in your courses. Type the address from a recording's link.", { ms: 7000 }); }, { cls: "btn small soft", busyLabel: "Looking…" })),
     h("div", { class: "actions" },
@@ -284,26 +330,72 @@ function videoSection() {
         let host;
         try { host = new URL(/^https?:/.test(input.value.trim()) ? input.value.trim() : `https://${input.value.trim()}`).host.toLowerCase(); } catch { return toast("That doesn't look like an address.", { error: true }); }
         if (!/panopto/.test(host) && !confirm(`${host} doesn't look like a Panopto site. Use it anyway?`)) return;
-        if (!(await chrome.permissions.request({ origins: [`https://${host}/*`] }).catch(() => false))) return toast("StudyPilot needs access to that site to read captions.", { error: true });
+        if (!(await chrome.permissions.request({ origins: [`https://${host}/*`] }).catch(() => false))) return toast("CampusPilot needs access to that site to read captions.", { error: true });
         await saveSettings({ videoHost: host }); state.videoCache = {}; toast("Connected. Recordings show on each course's Lectures page."); rerender();
       } }, s.videoHost ? "Update" : "Connect"),
-      s.videoHost ? h("button", { class: "btn small secondary", onclick: async () => { await chrome.permissions.remove({ origins: [`https://${s.videoHost}/*`] }).catch(() => {}); await saveSettings({ videoHost: "" }); state.videoCache = {}; rerender(); } }, "Disconnect") : null));
+      s.videoHost ? h("button", { class: "btn small secondary", onclick: async () => { await chrome.permissions.remove({ origins: [`https://${s.videoHost}/*`] }).catch(() => {}); await saveSettings({ videoHost: "" }); state.videoCache = {}; rerender(); } }, "Disconnect") : null),
+    h("div", { class: "field" }, "Playback speed"),
+    toggle("Speed control on videos and audio", "A small control on each lecture video or audio player, 0.25x to 16x. Keys: S slower, D faster, R reset. Changes playback speed only; nothing is skipped.", s.videoSpeedOn !== false, (v) => saveSettings({ videoSpeedOn: v })),
+    speedControl(),
+    toggle("Also on YouTube and Kaltura videos", "For lecture videos hosted there (asks for access to those sites)", !!s.videoSpeedMore, async (v, e) => {
+      if (v && !(await chrome.permissions.request({ origins: ["https://www.youtube.com/*", "https://www.youtube-nocookie.com/*", "https://*.kaltura.com/*"] }).catch(() => false))) { e.target.checked = false; return; }
+      await saveSettings({ videoSpeedMore: v });
+    }),
+    toggle("On every website", "Any video or audio anywhere, including mp3 files opened in a tab (asks for access to all sites; CampusPilot only adds the speed control there)", !!s.videoSpeedEverywhere, async (v, e) => {
+      if (v && !(await chrome.permissions.request({ origins: ["https://*/*", "http://*/*"] }).catch(() => false))) { e.target.checked = false; return; }
+      await saveSettings({ videoSpeedEverywhere: v });
+    }),
+    h("p", { class: "hint" }, s.videoSpeedEverywhere ? "Works on every website. For audio or video files on your computer, also turn on “Allow access to file URLs” for CampusPilot in chrome://extensions." : s.videoHost ? `Works on Canvas and ${s.videoHost}.` : "Works on Canvas, and on your lecture video site once it's connected above."),
+    h("p", { class: "hint" }, "Above about 4x, Chrome mutes the sound; 16x is the most Chrome allows."));
   return box;
 }
 
 // ---------- Gradescope ----------
+// "Turned in on Gradescope" checking: when it last ran, what it found, and anything it couldn't match, with Check now.
+function turnedInStatus() {
+  const box = h("div", { class: "gs-check" });
+  const draw = (c) => {
+    const when = c?.at ? new Date(c.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : null;
+    const lines = [];
+    if (!c) lines.push(h("div", { class: "meta" }, "Not checked yet."));
+    else if (c.state === "login") lines.push(h("div", { class: "note" }, "Gradescope wants you to log in, so CampusPilot can't see what you've turned in. ", h("button", { class: "linkish", onclick: () => send("GS_LOGIN") }, "Open Gradescope"), ", log in, then Check now."));
+    else if (c.state === "permission") lines.push(h("div", { class: "note" }, "CampusPilot doesn't have access to gradescope.com. Turn Gradescope off and on again above."));
+    else if (c.state === "off") lines.push(h("div", { class: "meta" }, "Turn Gradescope on for a course above."));
+    else if (c.state === "error") lines.push(h("div", { class: "note" }, `Couldn't check Gradescope: ${c.error}`));
+    else if (!c.courses?.length) lines.push(h("div", { class: "meta" }, `Checked ${when}: nothing open to check.`));
+    else for (const r of c.courses) {
+      lines.push(h("div", { class: "gs-line" }, h("b", {}, r.course || "Course"), " ",
+        !r.linked ? h("span", { class: "bad-text" }, "· couldn't find this course on Gradescope. Open it on Gradescope once (from its Canvas menu), then Check now.")
+          : r.error ? h("span", { class: "bad-text" }, `· ${r.error}`)
+          : h("span", { class: "muted" }, `· ${plural(r.turnedIn, "item")} turned in of ${r.found} on Gradescope`)));
+      if (r.unmatched?.length) lines.push(h("div", { class: "meta", style: "margin:0 0 4px 0" }, `Not found on Gradescope: ${r.unmatched.join(", ")}. If you turned these in elsewhere, tick them done on Home.`));
+    }
+    box.replaceChildren(h("div", { class: "row" }, h("div", { class: "grow" }, h("b", {}, "Turned-in check"), when ? h("div", { class: "meta" }, `Last checked ${when} · every 15 minutes`) : null),
+      act("Check now", async () => { const snap = await send("GS_RECHECK", { force: true, linkFromCanvas: true }); if (snap?.courses) state.snapshot = snap; draw(snap?.gsLastCheck); }, { cls: "btn small soft", busyLabel: "Checking…" })), ...lines);
+  };
+  chrome.storage.local.get("gsLastCheck").then(({ gsLastCheck }) => draw(gsLastCheck));
+  return box;
+}
+
 function gradescopeSection() {
   const GS_ORIGINS = ["https://www.gradescope.com/*"];
-  const box = h("div", {}, h("div", { class: "subhead" }, "Gradescope"));
+  const box = h("div", { style: "margin-top:10px" });
   chrome.permissions.contains({ origins: GS_ORIGINS }).then((ok) => {
     if (!ok) {
-      box.append(h("p", { class: "muted", style: "margin-top:0" }, "Download your submitted work with graded copies. StudyPilot only reads, using your own Gradescope login."),
+      box.append(h("p", { class: "muted desc", style: "margin-top:0" }, "Download your submitted work with graded copies. CampusPilot only reads, using your own Gradescope login."),
         h("button", { class: "btn small block", onclick: async () => { if (await chrome.permissions.request({ origins: GS_ORIGINS }).catch(() => false)) { state.gsCache = {}; rerender(); } } }, "Connect Gradescope"));
       return;
     }
     const all = state.gsAll;
-    box.append(h("div", { class: "row" }, h("div", { class: "grow" }, "Connected", h("div", { class: "meta" }, "Each course's Files page has its Gradescope work. Work you turned in there no longer shows as overdue.")),
-      h("button", { class: "btn small secondary", onclick: async () => { await chrome.permissions.remove({ origins: GS_ORIGINS }); state.gsCache = {}; state.gsAll = null; rerender(); } }, "Disconnect")));
+    box.append(turnedInStatus());
+    box.append(h("div", { class: "row" }, h("div", { class: "grow" }, "Connected", h("div", { class: "meta desc" }, "Each course's Files page has its Gradescope work.")),
+      h("button", { class: "btn small secondary", onclick: async () => {
+        await chrome.permissions.remove({ origins: GS_ORIGINS });
+        const ids = (visibleSnapshot()?.courses || []).map((c) => c.id);
+        let conn = state.settings; for (const id of ids) conn = { ...conn, conn: connPick(conn, "gradescope", id, false) };
+        await saveSettings({ conn: conn.conn });
+        state.gsCache = {}; state.gsAll = null; rerender();
+      } }, "Disconnect")));
     if (!all) {
       box.append(act("Download everything from Gradescope…", async () => { state.gsAll = await send("GS_ALL_COURSES"); state.gsPick = new Set((state.gsAll.courses || []).map((g) => g.id)); rerender(); },
         { cls: "btn small soft block", ico: "download", busyLabel: "Loading your courses…", attrs: { style: "margin-top:8px" } }));
@@ -317,7 +409,7 @@ function gradescopeSection() {
     const terms = new Map();
     for (const g of all.courses || []) { const t = g.term || "Other"; if (!terms.has(t)) terms.set(t, []); terms.get(t).push(g); }
     const P = state.gsPick;
-    box.append(h("p", { class: "muted" }, "Every course you pick goes into one zip, by term, course and assignment: graded copies when ready, otherwise what you turned in. Chrome asks where to save it."),
+    box.append(h("p", { class: "muted desc" }, "Every course you pick goes into one zip, by term, course and assignment: graded copies when ready, otherwise what you turned in. Chrome asks where to save it."),
       ...[...terms].map(([term, list]) => h("div", {}, h("div", { class: "field" }, term),
         h("div", { class: "checks" }, list.map((g) => h("label", {},
           h("input", { type: "checkbox", checked: P.has(g.id), onchange: (e) => { e.target.checked ? P.add(g.id) : P.delete(g.id); } }),
@@ -334,76 +426,11 @@ function gradescopeSection() {
 }
 
 // ---------- Data ----------
-const WANT_LABELS = {
-  syllabus: ["Syllabus", "Grading, schedule, policies"], assignments: ["Assignments & rubrics", "Instructions, due dates, scores"],
-  modules: ["Module outline", "How each course is organized"], pages: ["Pages & lecture notes", "Full text of course pages"],
-  discussions: ["Discussion prompts", "Topics to respond to"], announcements: ["Announcements", "Everything instructors posted"],
-  files: ["Course files", "Slides, PDFs, readings (one zip per course)"], myFiles: ["My submissions", "Everything you've turned in"],
-};
 
 function dataSection() {
   const s = state.settings;
   const snap = visibleSnapshot();
   const out = [];
-
-  // Background prep
-  if (snap) out.push(h("div", { class: "subhead" }, "Prepare lectures in the background"),
-    h("p", { class: "muted", style: "margin-top:0" }, "Reads new slides every couple of hours so practice and flashcards are instant. Reading a file can mark it “viewed” in Canvas."),
-    h("div", { class: "checks" }, snap.courses.map((c) => h("label", {},
-      h("input", { type: "checkbox", checked: (s.libraryCourses || []).includes(c.id), onchange: async (e) => {
-        if (e.target.checked) await askFileHostAccess();
-        const set = new Set(state.settings.libraryCourses || []); e.target.checked ? set.add(c.id) : set.delete(c.id);
-        await saveSettings({ libraryCourses: [...set] });
-        if (e.target.checked) send("LIBRARY_SYNC", { courseIds: [c.id] }).catch((err) => toast(err.message, { error: true }));
-      } }), h("span", { class: "grow" }, c.name)))));
-
-  // Full backup: one zip with everything, laid out like Canvas
-  if (snap) {
-    state.backup ??= { courses: new Set(snap.courses.map((c) => c.id)), want: { syllabus: true, assignments: true, modules: true, pages: true, discussions: false, announcements: true, files: false, myFiles: false }, mode: "new" };
-    const B = state.backup;
-    const courseChecks = () => h("div", { class: "checks" }, snap.courses.map((c) => h("label", {},
-      h("input", { type: "checkbox", checked: B.courses.has(c.id), onchange: (e) => { e.target.checked ? B.courses.add(c.id) : B.courses.delete(c.id); rerender(); } }), h("span", { class: "grow" }, c.name))));
-    out.push(h("div", { class: "subhead" }, "Back up everything"),
-      h("p", { class: "muted", style: "margin-top:0" }, "One zip with every file, page and assignment, organized the way Canvas shows them: a folder per course, then modules and their sections, other files in their Canvas folders, and your own submissions and grades. Chrome asks where to save it."),
-      h("details", { class: "adv" }, h("summary", {}, `Courses (${B.courses.size} of ${snap.courses.length})`), courseChecks()),
-      state.settings.videoHost ? h("div", { class: "checks" },
-        h("label", {}, h("input", { type: "checkbox", checked: B.transcripts !== false, onchange: (e) => { B.transcripts = e.target.checked; } }),
-          h("span", { class: "grow" }, h("b", {}, "Lecture video transcripts"), h("br"), h("small", {}, "The captions of each recording, as text files (small)"))),
-        h("label", {}, h("input", { type: "checkbox", checked: !!B.videoFiles, onchange: (e) => { B.videoFiles = e.target.checked; } }),
-          h("span", { class: "grow" }, h("b", {}, "Lecture video files"), h("br"), h("small", {}, "Very large. Saved next to the zip, only for recordings your instructor allows to be downloaded"))))
-        : "",
-      act(`Back up ${plural(B.courses.size, "course")}…`, async () => {
-        if (!B.courses.size) throw new Error("Pick at least one course.");
-        await askFileHostAccess();
-        const opts = { courseIds: [...B.courses], transcripts: B.transcripts !== false, videoFiles: !!B.videoFiles };
-        const est = await send("FULL_BACKUP", { ...opts, estimate: true });
-        const total = est.bytes + (opts.videoFiles ? est.videoBytes : 0);
-        const parts = [`${plural(est.items, "item")} (${fmtBytes(est.bytes)})`];
-        if (opts.videoFiles && est.videoCount) parts.push(`${plural(est.videoCount, "recording")} (about ${fmtBytes(est.videoBytes)})`);
-        if (total > 200e6 && !confirm(`This backup is about ${fmtBytes(total)}: ${parts.join(" and ")}. Continue?`)) return;
-        const r = await send("FULL_BACKUP", opts);
-        const failed = r.zips.reduce((n, z) => n + z.failed, 0);
-        const v = r.videos ? ` Videos: ${r.videos.done} saved${r.videos.notAllowed ? `, ${r.videos.notAllowed} not downloadable` : ""}.` : "";
-        toast(`Saved ${r.zips.map((z) => z.name).join(", ")} (${plural(r.items, "item")})${failed ? `. ${plural(failed, "item")} couldn't be added; see “_Not included.txt” inside.` : "."}${v}`, { ms: 12000 });
-      }, { cls: "btn block", ico: "download", busyLabel: "Backing up…" }),
-      h("p", { class: "hint" }, "Quizzes, tests and outside tools are never opened; locked items are skipped. Both are listed in “_Not included.txt” inside the zip."));
-
-    // Text for an AI (the old export): smaller, and can include only what changed
-    out.push(h("div", { class: "subhead" }, "Course text for your AI"),
-      h("p", { class: "muted", style: "margin-top:0" }, "The same courses as one readable document (syllabus, assignments, modules, pages, announcements) to paste into any AI, or project packs to add to an AI project."),
-      h("details", { class: "adv" }, h("summary", {}, "What to include"),
-        h("div", { class: "checks" }, Object.entries(WANT_LABELS).filter(([k]) => k !== "files" && k !== "myFiles").map(([k, [label, sub]]) => h("label", {},
-          h("input", { type: "checkbox", checked: !!B.want[k], onchange: (e) => { B.want[k] = e.target.checked; } }),
-          h("span", { class: "grow" }, h("b", {}, label), h("br"), h("small", {}, sub)))))),
-      seg([["new", "Only what's new"], ["all", "Everything"]], B.mode, (v) => { B.mode = v; rerender(); }, "What to include"),
-      h("div", { class: "actions" },
-        act("Copy for my AI", () => doBackup("ai"), { cls: "btn small", busyLabel: "Gathering…" }),
-        act("Download text", () => doBackup("download"), { cls: "btn small secondary", busyLabel: "Gathering…" })),
-      act("Make AI project packs", () => makeProjectPack([...B.courses], { onlyNew: B.mode === "new" }), { cls: "btn small soft block", ico: "export", busyLabel: "Building…", attrs: { style: "margin-top:8px" } }),
-      h("details", { class: "adv" }, h("summary", {}, "Instructions for an AI project"),
-        h("p", { class: "hint" }, "Paste these into your Project, Gem or custom instructions after adding the files."),
-        h("button", { class: "btn small secondary", onclick: async () => { await copyText(PROJECT_INSTRUCTIONS); toast("Instructions copied"); } }, "Copy instructions")));
-  }
 
   // Question bank
   const file = h("input", { type: "file", accept: "application/json,.json", hidden: true, onchange: async (e) => {
@@ -412,40 +439,28 @@ function dataSection() {
     catch (err) { toast(err.message || "Couldn't read that file.", { error: true }); }
   } });
   out.push(h("div", { class: "subhead" }, "Practice questions"),
-    h("p", { class: "muted", style: "margin-top:0" }, "Your quizzes, questions and progress live in this browser. Save a backup to move them to another computer."),
+    h("p", { class: "hint", style: "margin-top:0" }, "To hand your study data to an AI (checklists, what you miss, your week and plan), use Study › Export for AI. To export your Canvas courses, use Courses › Export courses."),
+    h("p", { class: "muted desc", style: "margin-top:0" }, state.sync?.account
+      ? `Your questions, quizzes and progress are kept in this browser and synced to your private CampusPilot folder in Google Drive (${state.sync.account.email || "your account"}), so they're the same on every computer you sign in on. A backup file is a copy you keep yourself.`
+      : "Your questions, quizzes and progress are kept in this browser. Sign in (Account & sync) to keep them in your Google Drive too, or save a backup file to move them yourself."),
     h("div", { class: "actions" },
-      act("Save backup", async () => { const list = await allQuestions(); await downloadText(`studypilot-questions-${today()}.json`, exportBank(list, await allQuizzes()), "application/json"); toast(`Saved ${plural(list.length, "question")}`); }, { cls: "btn small secondary" }),
+      act("Save backup", async () => { const list = await allQuestions(); await downloadText(`campuspilot-questions-${today()}.json`, exportBank(list, await allQuizzes()), "application/json"); toast(`Saved ${plural(list.length, "question")}`); }, { cls: "btn small secondary" }),
       h("button", { class: "btn small secondary", onclick: () => file.click() }, "Restore backup"), file),
     act("Clear all practice progress", async () => { if (!confirm("Delete every practice question and your progress? This can't be undone.")) return; await clearPractice(); state.bank = null; toast("Practice data cleared"); }, { cls: "btn small soft block", attrs: { style: "margin-top:8px" } }));
 
   // Privacy
   out.push(h("div", { class: "subhead" }, "Privacy"),
-    h("p", { class: "muted", style: "margin-top:0" }, "Everything stays in your browser. Nothing leaves it until you paste it into your AI or add events to your own calendar."),
+    h("p", { class: "muted desc", style: "margin-top:0" }, "Your data is kept in this browser and, if you sign in, in a private CampusPilot folder in your own Google Drive. Nothing else leaves it until you send something to your AI, add events to your own calendar, or send a problem report. No analytics, no tracking."),
     act("Forget backup and download history", async () => { await send("RESET_HISTORY"); toast("History cleared. The next backup includes everything."); }, { cls: "btn small soft block" }),
     act("Clear lecture library", async () => {
-      if (!confirm("Forget everything StudyPilot has read from your lectures? It re-reads them when needed.")) return;
+      if (!confirm("Forget everything CampusPilot has read from your lectures? It re-reads them when needed.")) return;
       await send("LIBRARY_CLEAR"); state.libraryStats = null; state.lectureCache = {}; toast("Library cleared.");
     }, { cls: "btn small soft block", attrs: { style: "margin-top:6px" } }),
     h("button", { class: "btn small secondary block", style: "margin-top:6px", onclick: async () => {
-      if (!confirm("Remove all StudyPilot data from this browser, including practice progress? Canvas and your calendar aren't affected.")) return;
+      if (!confirm(`Remove all CampusPilot data from this browser, including practice progress? Canvas and your calendar aren't affected.${state.sync?.account ? " You're signed in, so your Google Drive copy stays and comes back on the next sync; sign out first if you want a fresh start here." : ""}`)) return;
       await send("LIBRARY_CLEAR").catch(() => {}); await clearPractice().catch(() => {}); await chrome.storage.local.clear(); location.reload();
-    } }, "Clear all StudyPilot data"));
+    } }, "Clear all CampusPilot data"));
   return out;
-}
-
-async function doBackup(where) {
-  const B = state.backup;
-  const courseIds = [...B.courses];
-  if (!courseIds.length) throw new Error("Pick at least one course.");
-  if (!Object.values(B.want).some(Boolean)) throw new Error("Pick at least one thing to include.");
-  const { contents, downloads } = await send("EXPORT", { courseIds, want: { ...B.want, files: false, myFiles: false }, mode: B.mode });
-  const filesMsg = downloads ? (downloads.zips?.length ? ` Files saved as ${plural(downloads.zips.length, "zip")} in Downloads › StudyPilot.` : downloads.skipped ? " Files already up to date." : "") : "";
-  if (B.mode === "new" && contents.some((c) => c.since) && exportIsEmpty(contents)) return toast("Nothing new since your last backup." + filesMsg, { ms: 7000 });
-  const text = exportPack(contents, { goal: "study", tz, prefs: state.settings, snapshot: state.snapshot, downloadedFiles: downloads?.done || 0 });
-  if (where === "download" || text.length > 500000) {
-    await downloadText(`canvas-${contents.some((c) => c.since) ? "update" : "backup"}-${today()}.md`, text);
-    toast((where === "download" ? "Downloaded to Downloads › StudyPilot." : "That's a lot, so it was saved as a file. Attach it in your AI or add it to a project.") + filesMsg, { ms: 10000 });
-  } else await handToAI(text, { title: "Course backup" });
 }
 
 // ---------- Canvas look ----------
@@ -526,9 +541,9 @@ function lookCard() {
       look.courseColors?.[c.id] ? h("button", { class: "btn small soft", onclick: (e) => { e.preventDefault(); const cc = { ...look.courseColors }; delete cc[c.id]; setLook({ courseColors: cc }); } }, "Reset") : null);
   });
   return h("div", { id: "look-card" },
-    h("div", { class: "subhead" }, "Theme for Canvas and StudyPilot"),
-    h("p", { class: "muted", style: "margin-top:0" }, "Changes show on your open Canvas tabs right away. Pictures keep their real colors."),
-    isDarkTheme(look.theme) ? h("div", { class: "note" }, "The title bar and light border around this panel belong to Chrome, so StudyPilot can't color them. To make them dark too, set Chrome to Dark mode. ",
+    h("div", { class: "subhead" }, "Theme for Canvas and CampusPilot"),
+    h("p", { class: "muted desc", style: "margin-top:0" }, "Changes show on your open Canvas tabs right away. Pictures keep their real colors."),
+    isDarkTheme(look.theme) ? h("div", { class: "note" }, "The title bar and light border around this panel belong to Chrome, so CampusPilot can't color them. To make them dark too, set Chrome to Dark mode. ",
       h("button", { class: "linkish", onclick: () => chrome.tabs.create({ url: "chrome://settings/appearance" }) }, "Open Chrome's appearance settings")) : null,
     lookPreview(look),
     h("div", { class: "seg wrap", role: "group", "aria-label": "Theme" }, THEMES.map(([v, l]) => h("button", { "aria-pressed": look.theme === v, onclick: () => setLook({ theme: v }) }, l))),
@@ -558,4 +573,28 @@ function lookCard() {
     courseRows.length ? h("details", { class: "adv", style: "margin-top:10px" }, h("summary", {}, "Course colors"), h("div", { class: "checks" }, courseRows),
       h("p", { class: "hint" }, "Only changes how cards look in your browser; your Canvas colors aren't changed.")) : null,
     h("button", { class: "btn small soft block", style: "margin-top:12px", onclick: () => setLook({ ...DEFAULT_LOOK, courseColors: {} }) }, "Reset to Canvas defaults"));
+}
+
+// Lecture files kept on this computer (lib/filecache.js): how much, and a way to clear them.
+function savedFilesRow() {
+  const box = h("div", { class: "row", style: "margin-top:10px" });
+  const draw = async () => {
+    const { fileStats, clearFiles } = await import("../../lib/filecache.js");
+    const s = await fileStats().catch(() => ({ count: 0, bytes: 0 }));
+    box.replaceChildren(h("div", { class: "grow" }, h("b", {}, "Lecture files saved on this computer"),
+      h("div", { class: "meta" }, s.count ? `${s.count} file${s.count === 1 ? "" : "s"}, ${fmtBytes(s.bytes)}. Every lecture file CampusPilot reads is kept (never videos), so slides open even when Canvas won't hand them over again.` : "None yet. Each lecture file CampusPilot reads is kept here (never videos).")),
+      s.count ? h("button", { class: "btn small soft", onclick: async () => { if (!confirm("Delete the saved lecture files on this computer? They're downloaded again when needed.")) return; await clearFiles(); draw(); } }, "Clear") : null);
+    // The copies in Google Drive (sync on): shared by every computer signed in to sync.
+    const { syncAccount } = await chrome.storage.local.get("syncAccount");
+    const drive = h("div", { class: "row", style: "margin-top:8px;width:100%" });
+    box.after(drive);
+    box._drive?.remove(); box._drive = drive;
+    if (!syncAccount) { drive.append(h("div", { class: "meta grow" }, "Sign in under Settings › Account & sync and these files are also backed up to your Google Drive, so your other computers have them too.")); return; }
+    const d = await send("DRIVE_FILES_INFO").catch(() => null);
+    drive.append(h("div", { class: "grow" }, h("b", {}, "Backed up to your Google Drive"),
+      h("div", { class: "meta" }, d ? `${d.count} file${d.count === 1 ? "" : "s"}, ${fmtBytes(d.bytes)}, in CampusPilot's private app folder (it doesn't show in your Drive, but counts toward your storage; up to 2 GB). Your other computers get them from here.` : "Couldn't check right now.")),
+      d?.count ? h("button", { class: "btn small soft", onclick: async () => { if (!confirm("Delete the lecture files backed up to Google Drive? Your study data stays.")) return; await send("DRIVE_FILES_CLEAR").catch(() => {}); draw(); } }, "Clear") : null);
+  };
+  draw();
+  return box;
 }

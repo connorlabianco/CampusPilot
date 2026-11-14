@@ -1,7 +1,9 @@
 // Hidden page that reads lecture files (pdf.js needs a page context; the service worker can't host it).
 import * as pdfjs from "../vendor/pdfjs/pdf.mjs";
 import { analyzeFile } from "../lib/extract.js";
+import { getFile, putFile, keepable } from "../lib/filecache.js";
 import { ZipWriter } from "../lib/zipwrite.js";
+import { pageCourses, pageAssignments, GS } from "../lib/gradescope.js";
 
 pdfjs.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL("vendor/pdfjs/pdf.worker.mjs");
 const MAX_BYTES = 150e6;
@@ -64,15 +66,37 @@ const zipHandlers = {
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.target !== "offscreen") return false;
+  if (msg.type === "GS_READ") { // Gradescope pages, read with the student's own login and no tab
+    const { what, id } = msg.payload || {};
+    (what === "courses" ? pageCourses(GS) : pageAssignments(id, GS)).then((r) => sendResponse({ ok: true, r })).catch((e) => sendResponse({ ok: false, error: e.message }));
+    return true;
+  }
   if (zipHandlers[msg.type]) {
     Promise.resolve().then(() => zipHandlers[msg.type](msg.payload || {}))
       .then((r) => sendResponse(r))
       .catch((e) => sendResponse({ ok: false, error: e.message || String(e) }));
     return true;
   }
+  // Save a file on this computer (for the slide viewer and Gemini when they can't download it themselves).
+  if (msg.type === "SAVE_FILE") {
+    (async () => {
+      const { url, name, mime, id } = msg.payload;
+      if (!keepable(name, mime)) return { saved: false };
+      if (await getFile({ id, url }).catch(() => null)) return { saved: true, had: true };
+      const res = await fetch(url, { credentials: "include" });
+      if (!res.ok) throw new Error(`download failed (${res.status})`);
+      const type = res.headers.get("content-type") || "";
+      if (/text\/html/.test(type) && !/\.html?$/i.test(name)) throw new Error("got a web page instead of the file (are you logged in?)");
+      return { saved: await putFile({ id, url, name }, await res.blob(), { name, type: mime || type }) };
+    })().then((d) => sendResponse({ ok: true, data: d })).catch((e) => sendResponse({ ok: false, error: e.message || String(e) }));
+    return true;
+  }
   if (msg.type !== "EXTRACT") return false;
   (async () => {
-    const { url, name, mime } = msg.payload;
+    const { url, name, mime, id } = msg.payload;
+    // The copy saved on this computer first; otherwise download it (and keep it).
+    const saved = await getFile({ id, url }).catch(() => null);
+    if (saved) return analyzeFile(await saved.arrayBuffer(), { name, mime: mime || saved.type }, pdfjs);
     const res = await fetch(url, { credentials: "include" });
     if (!res.ok) throw new Error(`download failed (${res.status})`);
     const type = res.headers.get("content-type") || "";
@@ -80,6 +104,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     const len = Number(res.headers.get("content-length") || 0);
     if (len > MAX_BYTES) throw new Error("file is too large to pre-read");
     const buf = await res.arrayBuffer();
+    await putFile({ id, url, name }, buf, { name, type: mime || type }).catch(() => {});
     return analyzeFile(buf, { name, mime: mime || type }, pdfjs);
   })()
     .then((data) => sendResponse({ ok: true, data }))

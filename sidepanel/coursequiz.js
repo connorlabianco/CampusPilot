@@ -11,6 +11,7 @@ const PRIOS = [["0", "Skip"], ["1", "Low"], ["2", "Normal"], ["3", "High"]];
 /** Opens the Practice tab on this course's quiz, with these lectures picked (e.g. what an exam covers). */
 export function openCourseQuiz(courseId, { preselect = null } = {}) {
   state.cq = { courseId, pre: preselect ? new Set(preselect) : null, prio: {}, count: 20, exam: true, timed: false };
+  state.cqOpen = true;
   go("practice");
   setTimeout(() => $(".card.course-quiz")?.scrollIntoView({ behavior: "smooth", block: "start" }), 300);
 }
@@ -72,10 +73,10 @@ export async function courseQuizCard(all, snap) {
   const start = async () => {
     const list = pickCourseQuiz(groups, { count: Q.count, stats: itemStats });
     if (!list.length) return toast("Pick at least one lecture with questions.", { error: true });
-    await startSession(list, { mode: Q.exam ? "assessment" : "practice", title: `${courseName(Q.courseId)}: course quiz`, timed: Q.timed });
+    await startSession(list, { mode: Q.exam ? "assessment" : "practice", title: `${courseName(Q.courseId)}: mixed test`, timed: Q.timed });
   };
-  return h("div", { class: "card course-quiz" }, h("h3", {}, "Course quiz"),
-    h("p", { class: "muted", style: "margin-top:0" }, "Pick the lectures and how much each counts. Questions come from your lecture mastery, missed ones first. No AI needed."),
+  return h("div", { class: "card course-quiz" }, h("h3", {}, "Mixed test"),
+    h("p", { class: "muted desc", style: "margin-top:0" }, "Pick the lectures and how much each counts. Questions come from your lecture mastery, missed ones first. No AI needed."),
     courses.length > 1 ? h("div", { class: "seg wrap", role: "group", "aria-label": "Course" }, courses.map((id) =>
       h("button", { class: id === Q.courseId ? "on" : "", "aria-pressed": String(id === Q.courseId), style: `--c:${courseColor(id)}`, onclick: () => { Q.courseId = id; Q.prio = {}; Q.pre = null; rerender(); } }, courseName(id)))) : null,
     h("div", { class: "cq-list" }, groups.map(row)),

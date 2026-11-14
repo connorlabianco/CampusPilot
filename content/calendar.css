@@ -1,4 +1,4 @@
-/* StudyPilot on Canvas's calendar: drawn on top, never blocks clicks */
+/* CampusPilot on Canvas's calendar: drawn on top; Canvas's own events stay clickable */
 .sp-cal-layer { position: absolute; inset: 0; pointer-events: none; z-index: 3; }
 .sp-cal-ev { position: absolute; box-sizing: border-box; border-radius: 6px; padding: 2px 5px; font: 600 11px/1.25 system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; color: #1d1b18; }
 .sp-cal-ev b, .sp-cal-ev span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -8,6 +8,64 @@
 .sp-cal-ev.sp-plan.sp-done { opacity: .5; text-decoration: line-through; }
 .sp-cal-ev.sp-class { background: color-mix(in srgb, var(--sp-c, #888) 18%, #fff); border-left: 4px solid var(--sp-c, #888); }
 .sp-cal-ev.sp-office { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--sp-c, #888) 10%, #fff) 0 6px, #fff 6px 12px); border: 1px dashed var(--sp-c, #888); }
-.sp-cal-toggle { position: fixed; left: 16px; bottom: 16px; z-index: 9999; border: 1px solid #1f7a4a; background: #fff; color: #1f7a4a; font: 700 12px system-ui, sans-serif; padding: 8px 12px; border-radius: 999px; cursor: pointer; box-shadow: 0 4px 14px rgba(0,0,0,.15); }
-.sp-cal-toggle[aria-pressed="false"] { background: #1f7a4a; color: #fff; }
-.sp-cal-toggle:focus-visible { outline: 2px solid #2f6fed; outline-offset: 2px; }
+
+/* month view: one line per day */
+.sp-cal-chip { position: absolute; box-sizing: border-box; height: 19px; display: flex; align-items: center; gap: 6px; padding: 0 6px; border: 1px solid #1f7a4a; border-left: 4px solid var(--sp-c, #1f7a4a); border-radius: 5px; background: #fff; color: #1d1b18; font: 600 11px/1 system-ui, -apple-system, "Segoe UI", sans-serif; cursor: pointer; pointer-events: auto; text-align: left; }
+.sp-cal-chip b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; }
+.sp-cal-chip span { flex: none; color: #1f7a4a; }
+.sp-cal-chip.sp-free { background: rgba(31, 122, 74, .1); border-color: transparent; border-left-color: #1f7a4a; color: #1f7a4a; }
+.sp-cal-chip.sp-done { opacity: .55; }
+.sp-cal-chip.sp-more { border-color: transparent; background: none; color: #1f7a4a; padding-left: 4px; }
+.sp-cal-chip.sp-more b { font-weight: 600; }
+.sp-cal-chip.sp-done b { text-decoration: line-through; }
+.sp-cal-chip:hover { box-shadow: 0 2px 6px rgba(0,0,0,.18); }
+.sp-cal-chip:focus-visible, .sp-cal-toggle:focus-visible, .sp-cal-link:focus-visible { outline: 2px solid #2f6fed; outline-offset: 2px; }
+
+/* "Your plan" in the corner, and a day's list */
+.sp-cal-dock { position: fixed; left: 16px; bottom: 16px; z-index: 9999; display: flex; flex-direction: column; align-items: flex-start; gap: 8px; font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+.sp-cal-toggle { border: 1px solid #1f7a4a; background: #1f7a4a; color: #fff; font: 700 12.5px system-ui, sans-serif; padding: 9px 14px; border-radius: 999px; cursor: pointer; box-shadow: 0 4px 14px rgba(0,0,0,.18); }
+.sp-cal-toggle[aria-expanded="true"] { background: #fff; color: #1f7a4a; }
+.sp-cal-panel, .sp-cal-pop { background: #fff; color: #1d1b18; border: 1px solid rgba(0,0,0,.12); border-radius: 12px; box-shadow: 0 10px 34px rgba(0,0,0,.22); padding: 12px 14px; }
+.sp-cal-panel { width: 300px; max-height: min(70vh, 560px); display: flex; flex-direction: column; }
+.sp-cal-pop { position: fixed; z-index: 10000; width: 260px; font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+.sp-cal-panel h3 { margin: 0 0 6px; font: 800 14px system-ui, sans-serif; }
+.sp-cal-list { overflow: auto; flex: 1; margin: 0 -4px 8px; padding: 0 4px; }
+.sp-cal-panel h4, .sp-cal-pop h4 { margin: 10px 0 4px; font: 800 11px system-ui, sans-serif; text-transform: uppercase; letter-spacing: .05em; color: #6b665e; }
+.sp-cal-pop h4 { margin-top: 0; }
+.sp-cal-row { display: flex; align-items: baseline; gap: 8px; padding: 5px 0 5px 8px; border-left: 3px solid var(--sp-c, #1f7a4a); margin-bottom: 3px; }
+.sp-cal-row b { flex: 1; min-width: 0; font-weight: 650; }
+.sp-cal-row small { color: #6b665e; }
+.sp-cal-row.sp-class b, .sp-cal-row.sp-office b, .sp-cal-row.sp-study b { font-weight: 500; }
+.sp-cal-row.sp-done { opacity: .5; text-decoration: line-through; }
+.sp-cal-time { flex: none; width: 96px; color: #6b665e; font-variant-numeric: tabular-nums; font-size: 12px; }
+.sp-cal-empty { margin: 8px 0; color: #6b665e; }
+.sp-cal-sw { display: flex; align-items: center; gap: 8px; padding: 4px 0; cursor: pointer; }
+.sp-cal-sw input { margin: 0; accent-color: #1f7a4a; }
+.sp-cal-foot { display: flex; gap: 14px; margin-top: 6px; padding-top: 8px; border-top: 1px solid rgba(0,0,0,.1); }
+.sp-cal-link { border: 0; background: none; padding: 0; color: #1f7a4a; font: 700 12.5px system-ui, sans-serif; cursor: pointer; text-decoration: underline; }
+
+/* dark Canvas themes */
+:root[data-sp-theme="dark"] .sp-cal-panel, :root[data-sp-theme="dim"] .sp-cal-panel, :root[data-sp-theme="midnight"] .sp-cal-panel, :root[data-sp-theme="liquid-dark"] .sp-cal-panel,
+:root[data-sp-theme="dark"] .sp-cal-pop, :root[data-sp-theme="dim"] .sp-cal-pop, :root[data-sp-theme="midnight"] .sp-cal-pop, :root[data-sp-theme="liquid-dark"] .sp-cal-pop,
+:root[data-sp-theme="dark"] .sp-cal-chip:not(.sp-free), :root[data-sp-theme="dim"] .sp-cal-chip:not(.sp-free), :root[data-sp-theme="midnight"] .sp-cal-chip:not(.sp-free), :root[data-sp-theme="liquid-dark"] .sp-cal-chip:not(.sp-free),
+:root[data-sp-theme="dark"] .sp-cal-ev.sp-plan, :root[data-sp-theme="dim"] .sp-cal-ev.sp-plan, :root[data-sp-theme="midnight"] .sp-cal-ev.sp-plan, :root[data-sp-theme="liquid-dark"] .sp-cal-ev.sp-plan { background: #23262b; color: #ecebe8; border-color: #3fae75; }
+:root[data-sp-theme="dark"] .sp-cal-ev.sp-class, :root[data-sp-theme="dim"] .sp-cal-ev.sp-class, :root[data-sp-theme="midnight"] .sp-cal-ev.sp-class, :root[data-sp-theme="liquid-dark"] .sp-cal-ev.sp-class { background: color-mix(in srgb, var(--sp-c, #888) 30%, #1c1e22); color: #ecebe8; }
+:root:is([data-sp-theme="dark"], [data-sp-theme="dim"], [data-sp-theme="midnight"], [data-sp-theme="liquid-dark"]) :is(.sp-cal-time, .sp-cal-row small, .sp-cal-empty, .sp-cal-panel h4, .sp-cal-pop h4) { color: #a9a59d; }
+:root:is([data-sp-theme="dark"], [data-sp-theme="dim"], [data-sp-theme="midnight"], [data-sp-theme="liquid-dark"]) :is(.sp-cal-chip span, .sp-cal-link, .sp-cal-ev.sp-study, .sp-cal-chip.sp-free) { color: #5fd197; }
+:root:is([data-sp-theme="dark"], [data-sp-theme="dim"], [data-sp-theme="midnight"], [data-sp-theme="liquid-dark"]) .sp-cal-toggle[aria-expanded="true"] { background: #23262b; color: #5fd197; }
+
+/* Cleaner calendar look (a switch in "Your plan"): only spacing, type and tints; nothing is moved or hidden */
+.sp-cal-clean .fc-event { border-radius: 6px; font-size: 12px; line-height: 1.3; padding: 2px 5px; border-width: 0 0 0 3px; }
+.sp-cal-clean .fc-day-grid-event { margin: 1px 3px 2px; }
+.sp-cal-clean .fc-day-grid-event .fc-content { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.sp-cal-clean .fc-day-grid-event .fc-time { font-weight: 700; }
+.sp-cal-clean td.fc-today, .sp-cal-clean .fc-day.fc-today { background: rgba(31, 122, 74, .07); }
+.sp-cal-clean .fc-day-top.fc-today .fc-day-number, .sp-cal-clean .fc-day-number.fc-today { background: #1f7a4a; color: #fff; border-radius: 999px; padding: 2px 7px; margin: 3px; font-weight: 800; }
+.sp-cal-clean .fc-day-header { padding: 8px 0; font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .05em; }
+.sp-cal-clean .fc-day-header.fc-today { color: #1f7a4a; }
+.sp-cal-clean td.fc-sat:not(.fc-today), .sp-cal-clean td.fc-sun:not(.fc-today) { background: rgba(127, 127, 127, .045); }
+.sp-cal-clean .fc-other-month .fc-day-number { opacity: .45; }
+.sp-cal-clean .fc-past .fc-day-number { opacity: .6; }
+.sp-cal-clean .fc-time-grid .fc-slats .fc-minor td { border-top-style: none; }
+.sp-cal-clean .fc-time-grid .fc-axis { font-size: 11px; font-weight: 700; }
+.sp-cal-clean .fc-now-indicator { border-color: #d6453d; }

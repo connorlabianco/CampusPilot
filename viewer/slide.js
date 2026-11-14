@@ -2,6 +2,7 @@
 // Reads the lecture file with the student's own Canvas login (read-only) and draws the page with pdf.js.
 import * as pdfjs from "../vendor/pdfjs/pdf.mjs";
 import { getDoc } from "../lib/library.js";
+import { loadFile, getFile } from "../lib/filecache.js";
 import { rich } from "../lib/rich.js";
 pdfjs.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL("vendor/pdfjs/pdf.worker.mjs");
 
@@ -35,8 +36,8 @@ async function main() {
   const { settings = {} } = await chrome.storage.local.get("settings");
   const base = String(settings.canvasUrl || "").replace(/\/$/, "");
   const [courseId, kind, id] = key.split(":");
-  if (!doc?.key) return fail("StudyPilot hasn't read this lecture on this computer yet. Open its menu from the lecture list once, then try again.");
-  document.title = `${doc.title} · StudyPilot`;
+  if (!doc?.key) return fail("CampusPilot hasn't read this lecture on this computer yet. Open its menu from the lecture list once, then try again.");
+  document.title = `${doc.title} · CampusPilot`;
   $("#title").textContent = doc.title;
   if (kind === "F" && base) { const a = $("#canvas"); a.href = `${base}/courses/${courseId}/files/${id}`; a.hidden = false; }
   if (doc.kind === "notebook") return showNotebook(doc);
@@ -52,11 +53,16 @@ async function main() {
   const isPdf = /pdf/i.test(file.type || "") || /\.pdf$/i.test(file.name || "");
   if (isPdf) {
     try {
-      const res = await fetch(file.url, { credentials: "include" });
-      if (!res.ok) throw new Error(`Canvas said ${res.status}`);
-      pdf = await pdfjs.getDocument({ data: new Uint8Array(await res.arrayBuffer()), isEvalSupported: false }).promise;
+      // The copy saved on this computer, else a fresh download (kept for next time), else the background downloads it.
+      let blob = await loadFile(file).catch(() => null);
+      if (!blob) {
+        const r = await chrome.runtime.sendMessage({ type: "FILE_SAVE", payload: { file } }).catch(() => null);
+        blob = r?.ok ? await getFile(file) : null;
+        if (!blob) throw new Error(r?.error || "Canvas didn't hand over the file");
+      }
+      pdf = await pdfjs.getDocument({ data: new Uint8Array(await blob.arrayBuffer()), isEvalSupported: false }).promise;
       total = pdf.numPages;
-    } catch (e) { pdf = null; useText(doc, `Couldn't load the file (${e.message}). Showing its text instead.`); }
+    } catch (e) { pdf = null; useText(doc, `Couldn't load the file (${e.message}). Showing its text instead. Open it once in Canvas, then try again.`); }
   } else useText(doc);
   page = Math.min(page, total);
   await draw();

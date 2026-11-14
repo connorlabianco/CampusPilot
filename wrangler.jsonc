@@ -1,0 +1,33 @@
+// Cloudflare settings for CampusPilot's website and report server (see the Cloudflare setup guide).
+{
+  "name": "campuspilot",
+  "main": "worker/index.js",
+  "compatibility_date": "2025-09-01",
+  // The website: everything in docs/ is served as-is. Requests to /api/* and /admin go to the worker first.
+  "assets": {
+    "directory": "./docs",
+    "binding": "ASSETS",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "404-page",
+    "run_worker_first": ["/api/*", "/admin", "/admin/"]
+  },
+  // Both addresses point here; the worker forwards the old one to the new one.
+  "routes": [
+    { "pattern": "campuspilot.clabianco.fyi", "custom_domain": true },
+    { "pattern": "studypilot.clabianco.fyi", "custom_domain": true }
+  ],
+  // Where reports are kept. Paste your database's ID here (Cloudflare setup guide, step 3).
+  "d1_databases": [
+    { "binding": "DB", "database_name": "campuspilot-reports", "database_id": "a84f9d0f-604d-48ac-9ea0-ea757ab3a2eb" }
+  ],
+  // Once a day: delete reports older than 180 days.
+  "triggers": { "crons": ["17 11 * * *"] },
+  "vars": {
+    // Only these Chrome extension IDs may send reports (the store copy; the dev build uses the same ID).
+    "EXTENSION_IDS": "fimfldjklciihkiipnncdgkbegkkcdim"
+  },
+  "observability": { "enabled": true }
+  // Optional, emails you when a report arrives (Cloudflare setup guide, step 9): remove the // in front of the next
+  // line, and set NOTIFY_TO and NOTIFY_FROM as secrets in Cloudflare (so no email address is in this public file).
+  // ,"send_email": [{ "name": "MAIL" }]
+}

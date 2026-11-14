@@ -1,10 +1,10 @@
 // Study plan: the student picks what they're studying for; their AI sizes each assignment (once, from its files)
-// and sets the priorities; StudyPilot fits the work into the study time marked on My week and moves missed work.
+// and sets the priorities; CampusPilot fits the work into the study time marked on My week and moves missed work.
 import { h, $, state, send, toast, plural, ai, visibleSnapshot, lecturesFor, courseColor, courseName, rerender, go, views } from "./core.js";
 import { handToAI } from "./aiflow.js";
 import { icon } from "../lib/icons.js";
 import { ymd, addDays, emptyWeek, niceTime, toMin } from "../lib/schedule.js";
-import { sizesPrompt, parseSizes, prioritiesPrompt, parsePriorities, studySlots, planDays, planInfo, needsReplan } from "../lib/planner.js";
+import { sizesPrompt, parseSizes, prioritiesPrompt, parsePriorities, studySlots, planDays, planInfo, needsReplan, learnFirst, matchLecture } from "../lib/planner.js";
 import { allItems, itemLevel } from "../lib/checklist.js";
 import { examLectures } from "../lib/examplan.js";
 import { allSessions } from "../lib/quiz.js";
@@ -57,7 +57,7 @@ export async function openPlanSheet() {
   const { courses, exams } = await candidates();
   const prev = (await getPlan())?.selection;
   const { week: wk } = await get("week");
-  const week = { ...emptyWeek(), ...(wk || {}) };
+  let week = { ...emptyWeek(), ...(wk || {}) };
   const sel = {
     courses: new Set(prev?.courses || courses.map((c) => c.id)),
     exams: new Set(prev?.exams || courses.flatMap((c) => c.exams.map(examKey))),
@@ -68,13 +68,22 @@ export async function openPlanSheet() {
   const defTo = ymd(new Date(Math.min(Date.now() + 27 * DAYMS, Math.max(Date.now() + 13 * DAYMS, firstExam ? Date.parse(firstExam) : 0))));
   const toInput = h("input", { type: "date", value: prev?.to && prev.to > ymd(new Date()) ? prev.to : defTo, min: ymd(addDays(new Date(), 1)), max: ymd(addDays(new Date(), 42)), "aria-label": "Plan until" });
   const note = h("textarea", { rows: 2, placeholder: "Anything your AI should know? e.g. I'm weak at proofs; I want HW done a day early.", "aria-label": "A note for your AI" }, prev?.note || "");
-  const check = (set, key, label, sub, extra = {}) => h("label", { class: "plan-pick" }, h("input", { type: "checkbox", checked: set.has(key), onchange: (e) => { e.target.checked ? set.add(key) : set.delete(key); }, ...extra }),
+  const check = (set, key, label, sub, extra = {}) => h("label", { class: "plan-pick" }, h("input", { type: "checkbox", checked: set.has(key), onchange: (e) => { e.target.checked ? set.add(key) : set.delete(key); draw(); }, ...extra }),
     h("span", { class: "grow" }, label, sub ? h("small", {}, sub) : null));
-  const fmtDue = (iso) => new Date(iso).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  const fmtDue = (iso) => { const d = new Date(iso); return `${d.toLocaleDateString([], { weekday: "short" })} ${niceTime(`${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`)}`; };
+  const opened = new Set();
   const avail = () => studySlots(week, ymd(new Date()), toInput.value, courseCtx()).reduce((a, s) => a + s.b - s.a, 0);
-  const availEl = h("div", { class: "hint" });
-  const showAvail = () => { const m = avail(); availEl.replaceChildren(m ? `Study time on My week until then: about ${Math.round(m / 6) / 10} hours.` : h("span", {}, h("b", {}, "No study time marked yet. "), "StudyPilot plans into the times you mark on My week. ", h("button", { class: "linkish", onclick: () => import("./weekai.js").then((m) => m.openWeek()) }, "Open My week"))); };
+  const availEl = h("div", { class: "note", style: "margin-top:6px" });
+  const showAvail = () => { const m = avail(); availEl.replaceChildren(m ? `Study time on My week until then: about ${Math.round(m / 6) / 10} hours.` : h("span", {}, h("b", {}, "No study time marked yet. "), "CampusPilot plans into the times you mark on My week. ", h("button", { class: "linkish", onclick: () => import("./weekai.js").then((m) => m.openWeek()) }, "Open My week"))); };
   toInput.onchange = showAvail; showAvail();
+  // Study time marked on My week (in its own tab) counts here right away, without reopening the plan.
+  const onWeek = (ch, area) => {
+    if (area !== "local" || !ch.week) return;
+    if (!dlg.open || !availEl.isConnected) return chrome.storage.onChanged?.removeListener(onWeek);
+    week = { ...emptyWeek(), ...(ch.week.newValue || {}) }; showAvail();
+  };
+  chrome.storage.onChanged?.addListener(onWeek);
+  dlg.addEventListener("close", () => chrome.storage.onChanged?.removeListener(onWeek), { once: true });
 
   const courseBox = (c) => {
     const lecs = c.lectures;
@@ -84,14 +93,20 @@ export async function openPlanSheet() {
       h("option", { value: "" }, "Add a lecture (its checklist is made first)…"), without.filter((l) => !sel.lectures.has(l.key)).map((l) => h("option", { value: l.key }, l.title)));
     const body = h("div", { class: "plan-course-body" },
       c.exams.length ? [h("div", { class: "field" }, "Exams"), c.exams.map((e) => check(sel.exams, examKey(e), e.title, ` · ${new Date(e.date).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })}`))] : null,
-      c.assignments.length ? [h("div", { class: "field" }, "Assignments"), c.assignments.map((a) => check(sel.assignments, aRef(c.id, a.id), a.name, ` · due ${fmtDue(a.due_at)}${a.kind === "quiz" ? " · quiz (prep time only)" : ""}`))] : h("div", { class: "hint" }, "Nothing due in the next four weeks."),
+      c.assignments.length ? [h("div", { class: "field" }, "Assignments"), c.assignments.map((a) => check(sel.assignments, aRef(c.id, a.id), a.name, ` · ${fmtDue(a.due_at)}${a.kind === "quiz" ? " · quiz" : ""}`))] : h("div", { class: "hint" }, "Nothing due in the next four weeks."),
       h("div", { class: "field" }, "Lectures to learn"),
       withCl.map((l) => check(sel.lectures, l.key, l.title, l.left ? ` · ${l.left} of ${l.total} items left` : " · learned")),
       without.filter((l) => sel.lectures.has(l.key) && !l.anyChecklist).map((l) => check(sel.lectures, l.key, l.title, " · checklist will be made first")),
       without.length ? addSel : null);
+    // Each course is one line ("1 exam · 3 assignments · 1 lecture") that opens to the list.
+    const n = (arr, set, key) => arr.filter((x) => set.has(key(x))).length;
+    const ne = n(c.exams, sel.exams, examKey), na = n(c.assignments, sel.assignments, (a) => aRef(c.id, a.id)), nl = n(lecs, sel.lectures, (l) => l.key);
+    const sum = [ne ? plural(ne, "exam") : "", na ? plural(na, "assignment") : "", nl ? plural(nl, "lecture") : ""].filter(Boolean).join(" · ") || "nothing picked";
+    const fold = h("details", { class: "plan-course-fold", open: opened.has(c.id) }, h("summary", {}, sum), body);
+    fold.addEventListener("toggle", () => { fold.open ? opened.add(c.id) : opened.delete(c.id); });
     return h("div", { class: "plan-course", style: `--c:${courseColor(c.id)}` },
       h("label", { class: "plan-course-head" }, h("input", { type: "checkbox", checked: sel.courses.has(c.id), onchange: (e) => { e.target.checked ? sel.courses.add(c.id) : sel.courses.delete(c.id); draw(); } }), h("span", { class: "dot" }), h("b", {}, c.name)),
-      sel.courses.has(c.id) ? body : null);
+      sel.courses.has(c.id) ? fold : null);
   };
   const list = h("div", {});
   const draw = () => list.replaceChildren(...courses.map(courseBox));
@@ -103,15 +118,19 @@ export async function openPlanSheet() {
       if (!avail()) throw new Error("Mark some study time on My week first: the plan goes into those times.");
       await makePlan(selection, courses);
       close();
-    } catch (e) { toast(e.message, { error: true, ms: 8000 }); } finally { btn.disabled = false; }
+    } catch (e) {
+      // Close the sheet so the message isn't hidden behind it; when it's about study time, offer My week.
+      close();
+      toast(e.message, { error: true, ms: 12000, action: /My week/.test(e.message) ? { label: "Open My week", run: () => import("./weekai.js").then((m) => m.openWeek()) } : null });
+    } finally { btn.disabled = false; }
   };
   dlg.replaceChildren(h("div", { class: "sheet-in" },
-    h("div", { class: "sheet-head" }, h("div", { class: "grow" }, h("b", {}, "Study plan"), h("div", { class: "meta" }, "Pick what you're studying for. Your AI sizes the work; StudyPilot fits it into your study time.")), h("button", { class: "ghost", "aria-label": "Close", onclick: close }, icon("close", 18))),
+    h("div", { class: "sheet-head" }, h("div", { class: "grow" }, h("b", {}, "Study plan"), h("div", { class: "meta desc" }, "Pick what you're studying for. Your AI sizes the work; CampusPilot fits it into your study time.")), h("button", { class: "ghost", "aria-label": "Close", onclick: close }, icon("close", 18))),
     h("div", { class: "sheet-sec" }, h("div", { class: "row" }, h("span", { class: "grow" }, h("b", {}, "Plan until")), toInput), availEl),
     h("div", { class: "sheet-sec" }, list),
     h("div", { class: "sheet-sec" }, h("div", { class: "field" }, "A note for your AI (optional)"), note),
     h("div", { class: "sheet-sec" }, h("button", { class: "btn block", onclick: (e) => go_(e.currentTarget) }, "Make my plan"),
-      h("div", { class: "hint", style: "margin-top:6px" }, `This adds a few requests to your list for ${ai().url ? ai().name : "your AI"}: a checklist for any new lecture you picked, one look at the assignments not sized yet (their files go along), then the plan itself. You press Send for each.`))));
+      h("div", { class: "hint desc", style: "margin-top:6px" }, `This adds a few requests to your list for ${ai().url ? ai().name : "your AI"}: a checklist for any new lecture you picked, one look at the assignments not sized yet (their files go along), then the plan itself. ${ai().direct ? "They run one after another, right here." : "You press Send for each."}`))));
 }
 
 // Queues what the plan needs (checklists, assignment sizes, then the plan) and starts the list.
@@ -135,7 +154,7 @@ async function makePlan(selection, courses) {
   await Q.removeJob("priorities::");
   await Q.addJob({ kind: "priorities" }, { quiet: true });
   n++;
-  toast(`${plural(n, "request")} for ${ai().url ? ai().name : "your AI"}. Press Send for each; your plan appears on Today.`, { ms: 8000 });
+  toast(ai().direct ? `${plural(n, "request")} for Gemini, running now. Your plan appears on Home.` : `${plural(n, "request")} for ${ai().url ? ai().name : "your AI"}. Press Send for each; your plan appears on Home.`, { ms: 8000 });
   await Q.startQueue();
 }
 
@@ -170,15 +189,22 @@ export async function requestSizes(refs) {
     });
     if (hw[a.id]) a.files.push({ name: `${hw[a.id].name} (JupyterHub: questions and data only)`, text: hw[a.id].text });
   }
+  // Lectures get short codes (L1, L2…) so the AI can say exactly which ones an assignment needs.
   const lectures = [];
-  for (const cid of new Set(items.map((a) => a.courseId))) for (const l of (await lecturesFor(cid).catch(() => [])).filter((x) => x.is_lecture)) lectures.push(l.title);
-  await toPlanChat(sizesPrompt({ items, lectures: lectures.slice(0, 60) }), { expect: "sizes", title: `Sizing ${plural(items.length, "assignment")}`, files,
-    meta: { refs, dues: Object.fromEntries(items.map((a) => [a.ref, a.due_at])) } });
+  for (const cid of new Set(items.map((a) => a.courseId))) for (const l of (await lecturesFor(cid).catch(() => [])).filter((x) => x.is_lecture)) lectures.push({ code: `L${lectures.length + 1}`, title: `${l.title}${items.some((a) => a.courseId !== cid) ? ` (${courseName(cid)})` : ""}`, key: l.key });
+  const shown = lectures.slice(0, 80);
+  await toPlanChat(sizesPrompt({ items, lectures: shown }), { expect: "sizes", title: `Sizing ${plural(items.length, "assignment")}`, files,
+    meta: { refs, dues: Object.fromEntries(items.map((a) => [a.ref, a.due_at])), lectureCodes: Object.fromEntries(shown.map((l) => [l.code, l.key])) } });
 }
 export async function importSizes(text, meta) {
   const found = parseSizes(text);
   const { planSizes = {} } = await get("planSizes");
-  for (const [ref, s] of Object.entries(found)) planSizes[ref] = { ...s, at: Date.now(), due: meta?.dues?.[ref] || null };
+  const codes = meta?.lectureCodes || {};
+  for (const [ref, s] of Object.entries(found)) {
+    // "L3" → that lecture exactly (older replies named lectures by title; those are matched by title later)
+    const needKeys = [...new Set(s.needs.map((n) => codes[(String(n).match(/\bL\d+\b/i) || [""])[0].toUpperCase()]).filter(Boolean))];
+    planSizes[ref] = { ...s, needKeys, at: Date.now(), due: meta?.dues?.[ref] || null };
+  }
   await chrome.storage.local.set({ planSizes });
   toast(`Estimates saved for ${plural(Object.keys(found).length, "assignment")}.`);
 }
@@ -191,7 +217,7 @@ async function paceSeconds() {
 }
 export async function requestPriorities() {
   const { planSelection: selection, planSizes = {}, checklists = {}, itemStats = {}, ledger = {}, week: wk } = await get(["planSelection", "planSizes", "checklists", "itemStats", "ledger", "week"]);
-  if (!selection) throw new Error("Pick what you're studying for first (Today › Study plan).");
+  if (!selection) throw new Error("Pick what you're studying for first (Home › Study plan).");
   const week = { ...emptyWeek(), ...(wk || {}) };
   const today = ymd(new Date()), to = selection.to && selection.to > today ? selection.to : ymd(addDays(new Date(), 14));
   const nowMin = new Date().getHours() * 60 + new Date().getMinutes();
@@ -205,6 +231,7 @@ export async function requestPriorities() {
   const exams = await send("ALL_EXAMS").catch(() => []);
   const refs = [], left0 = {};
   const courses = [];
+  const needs = {}, dues = {}, extra = [];
   for (const c of snap?.courses || []) {
     if (!selection.courses.includes(c.id)) continue;
     const lectures = await lecturesFor(c.id).catch(() => []);
@@ -217,8 +244,24 @@ export async function requestPriorities() {
       const ref = aRef(c.id, a.id); refs.push(ref);
       return { ref, name: a.name, due: new Date(a.due_at).toLocaleString("en-US", { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }), points: a.points, size: planSizes[ref] || null };
     });
+    // Learn first: the lectures each assignment needs join the plan (even ones not picked), ahead of its work.
+    const lecList = lectures.filter((l) => l.is_lecture !== false && ["File", "Page", "Notebook"].includes(l.type));
+    const wanted = new Set(selection.lectures);
+    for (const a of assignments) {
+      const full = (c.assignments || []).find((x) => aRef(c.id, x.id) === a.ref);
+      dues[a.ref] = full?.due_at || null;
+      const exact = (a.size?.needKeys || []).map((k) => lecList.find((l) => l.key === k)).filter(Boolean);
+      for (const need of exact.length ? exact : a.size?.needs || []) {
+        const l = typeof need === "object" ? need : matchLecture(need, lecList);
+        if (!l) continue;
+        (needs[a.ref] ||= []).push(`lec:${l.key}`);
+        const rec = checklists[l.key];
+        if (rec && String(rec.courseId) === String(c.id)) wanted.add(l.key);
+        else if (!extra.some((x) => x.ref === `lec:${l.key}`)) { extra.push({ ref: `lec:${l.key}`, title: `Learn ${l.title}`, minutes: 45, for: a.name }); refs.push(`lec:${l.key}`); }
+      }
+    }
     const lecs = [];
-    for (const key of selection.lectures) {
+    for (const key of wanted) {
       const rec = checklists[key];
       if (!rec || String(rec.courseId) !== String(c.id)) continue;
       const items = allItems(rec.cl);
@@ -228,6 +271,8 @@ export async function requestPriorities() {
       const partsLeft = rec.parts.filter((p) => p.items.some((id) => left.some((it) => it.id === id))).map((p) => p.n);
       lecs.push({ ref, title: rec.lecture.title, left: left.length, total: items.length, partsLeft: partsLeft.length ? `parts ${partsLeft.join(", ")} of ${rec.parts.length}` : "",
         minutes: Math.round((left.length * pace * 1.6) / 60) + 5, sections: rec.cl.sections.map((s) => s.title).slice(0, 12) });
+      const forA = assignments.find((a) => (needs[a.ref] || []).includes(ref));
+      if (forA) extra.push({ ref, title: `Learn ${rec.lecture.title}`, minutes: lecs[lecs.length - 1].minutes, for: forA.name });
     }
     // weak spots: items answered wrong most often
     const weak = [];
@@ -240,13 +285,18 @@ export async function requestPriorities() {
     courses.push({ id: c.id, name: c.code || c.name, weights: rows, exams: cExams, assignments, lectures: lecs, weak: weak.sort((a, b) => b[0] - a[0]).slice(0, 4).map((w) => w[1]) });
   }
   const text = prioritiesPrompt({ today, to, days, paceSec: pace, note: selection.note, courses });
-  await toPlanChat(text, { expect: "priorities", title: "Study plan", meta: { refs, left0, from: today, to, selection } });
+  await toPlanChat(text, { expect: "priorities", title: "Study plan", meta: { refs, left0, from: today, to, selection, needs, dues, extra } });
 }
 export async function importPriorities(text, meta) {
-  const { tasks, advice } = parsePriorities(text, { refs: meta.refs || [] });
+  const parsed = parsePriorities(text, { refs: meta.refs || [] });
+  const { advice } = parsed;
+  const { week: wk } = await get("week");
+  const today = ymd(new Date());
+  const tasks = learnFirst(parsed.tasks, { needs: meta.needs || {}, dues: meta.dues || {}, extra: meta.extra || [], today,
+    slots: studySlots({ ...emptyWeek(), ...(wk || {}) }, today, meta.to, courseCtx()) });
   const plan = { selection: meta.selection, tasks, advice, at: Date.now(), from: meta.from, to: meta.to, left0: meta.left0 || {} };
   await chrome.storage.local.set({ plan, planDone: {}, planDay: null });
-  toast(`Your plan is ready: ${plural(tasks.length, "task")}, fitted into your study time. See Today.`, { ms: 8000 });
+  toast(`Your plan is ready: ${plural(tasks.length, "task")}, fitted into your study time. See Home.`, { ms: 8000 });
   go("today");
 }
 
@@ -277,7 +327,7 @@ export async function startTask(ref) {
     const l = (await lecturesFor(courseId).catch(() => [])).find((x) => x.key === key);
     const { openSheet, lectureScope } = await import("./sheet.js");
     if (l) return openSheet(lectureScope(courseId, l));
-    return toast("StudyPilot can't find this lecture right now.");
+    return toast("CampusPilot can't find this lecture right now.");
   }
   if (kind === "review") {
     // exam review: a course quiz on the lectures in the plan for this course
@@ -298,11 +348,17 @@ async function toggleDone(chunk) {
   rerender();
 }
 
-export async function planCard() {
+// Today: classes from My week and the plan's study sittings, in one list in time order.
+export async function planCard({ schedule = { has: false, rows: [] } } = {}) {
   const r = await computeDays();
-  if (!r) return h("div", { class: "card" }, h("h3", {}, "Study plan"),
-    h("p", { class: "muted", style: "margin:0 0 8px" }, "Pick what you're studying for. Your AI sizes the work from the real files; StudyPilot fits it into the study time you mark on My week and moves anything you miss."),
-    h("button", { class: "btn small", onclick: () => openPlanSheet() }, "Make a study plan"));
+  const openWeek = () => import("./weekai.js").then((m) => m.openWeek());
+  if (!r) return h("div", { class: "card plan-card" },
+    h("div", { class: "row" }, h("h3", { class: "grow", style: "margin:0" }, "Today"),
+      h("button", { class: "btn small soft", onclick: openWeek }, schedule.has ? "My week" : "Set up My week")),
+    schedule.rows.length ? h("div", { class: "sched", style: "margin-top:8px" }, schedule.rows.map((x) => x.node))
+      : h("div", { class: "muted", style: "margin:6px 0" }, schedule.has ? "No classes or study time today." : "Add your class times and the times you're free to study on My week."),
+    h("p", { class: "muted desc", style: "margin:8px 0" }, "A study plan picks what to work on in each study time: your AI sizes the work from the real files, and anything you miss moves to your next study time."),
+    h("div", { class: "actions" }, h("button", { class: "btn small", onclick: () => openPlanSheet() }, "Make a study plan")));
   const { plan, days } = r;
   const nowMin = new Date().getHours() * 60 + new Date().getMinutes();
   const refsNow = (visibleSnapshot()?.courses || []).filter((c) => plan.selection?.courses?.includes(c.id))
@@ -320,18 +376,21 @@ export async function planCard() {
   };
   const short = days.short.filter((s) => s.priority <= 2);
   const Q = await import("./queue.js");
+  // Plan sittings already sit inside study time, so the "Study time" rows themselves aren't repeated.
+  const merged = [...days.today.map((c) => ({ start: c.start, node: row(c) })), ...schedule.rows.filter((x) => x.type !== "study")]
+    .sort((a, b) => toMin(a.start) - toMin(b.start)).map((x) => x.node);
   return h("div", { class: "card plan-card" },
-    h("div", { class: "row" }, h("h3", { class: "grow", style: "margin:0" }, "Today's plan"),
-      h("button", { class: "btn small soft", onclick: () => openPlanSheet() }, "Change")),
+    h("div", { class: "row" }, h("h3", { class: "grow", style: "margin:0" }, "Today"),
+      h("button", { class: "btn small soft", onclick: () => openPlanSheet() }, "Change plan")),
     plan.advice ? h("div", { class: "meta", style: "margin:4px 0 6px" }, plan.advice) : null,
-    days.today.length ? h("div", { class: "sched" }, days.today.map(row)) : h("div", { class: "muted", style: "margin:6px 0" }, "Nothing planned today."),
+    merged.length ? h("div", { class: "sched" }, merged) : h("div", { class: "muted", style: "margin:6px 0" }, "Nothing planned today."),
     days.today.some((c) => toMin(c.end) <= nowMin && !c.done) ? h("div", { class: "hint" }, "Didn't get to something? Leave it unchecked: it moves to your next study time.") : null,
     days.later.length ? h("details", { class: "topic-more" }, h("summary", {}, `Coming up: ${plural(days.later.length, "sitting")} until ${new Date(`${plan.to}T12:00:00`).toLocaleDateString([], { month: "short", day: "numeric" })}`),
       days.later.slice(0, 12).map((c) => h("div", { class: "plan-later" }, h("span", { class: "sched-time" }, `${new Date(`${c.date}T12:00:00`).toLocaleDateString([], { weekday: "short" })} ${niceTime(c.start)}`), h("span", { class: "grow" }, c.title)))) : null,
     short.length ? h("div", { class: "note warn" }, `Doesn't fit in your study time: ${short.slice(0, 3).map((s) => `${s.title} (${Math.round(s.minutes / 6) / 10} h${s.latest ? ` by ${new Date(`${s.latest}T12:00:00`).toLocaleDateString([], { weekday: "short" })}` : ""})`).join(", ")}. Add study time on My week, or replan.`) : null,
     why ? h("div", { class: "note" }, `${why} `, h("button", { class: "linkish", onclick: () => replan() }, "Update my plan")) : null,
     h("div", { class: "actions" },
-      h("button", { class: "btn small soft", onclick: () => import("./weekai.js").then((m) => m.openWeek()) }, "My week"),
+      h("button", { class: "btn small soft", onclick: openWeek }, "My week"),
       h("button", { class: "btn small soft", onclick: () => replan() }, "Replan")));
 }
 

@@ -152,7 +152,7 @@
 
   function todoRow(a, { details = false } = {}) {
     const due = relDue(a.due_at, a), done = doneIds.includes(a.id);
-    const box = h("input", { type: "checkbox", class: "sp-check", title: "Mark done (only in StudyPilot)", "aria-label": `Mark ${a.name} done` });
+    const box = h("input", { type: "checkbox", class: "sp-check", title: "Mark done (only in CampusPilot)", "aria-label": `Mark ${a.name} done` });
     box.checked = done;
     box.addEventListener("change", async () => {
       doneIds = box.checked ? [...new Set([...doneIds, a.id])] : doneIds.filter((x) => x !== a.id);
@@ -367,13 +367,13 @@
       ...courses().map((c) => h("button", { class: "sp-x-chip" + (E.course === c.id ? " on" : ""), onclick: () => { E.course = c.id; renderExpanded(); } }, dot(c.id), c.code || c.name))];
     const search = h("input", { id: "sp-x-search", type: "search", placeholder: "Search…", value: E.q, "aria-label": "Search", oninput: (e) => { E.q = e.target.value; renderExpanded(); } });
 
-    const panel = h("div", { class: "sp-x-panel", role: "dialog", "aria-modal": "true", "aria-label": "StudyPilot" },
+    const panel = h("div", { class: "sp-x-panel", role: "dialog", "aria-modal": "true", "aria-label": "CampusPilot" },
       h("header", { class: "sp-x-head" },
         h("div", { class: "sp-x-tabs", role: "tablist" }, tabs.map(([v, l]) => h("button", { class: "sp-x-tab" + (E.tab === v ? " on" : ""), role: "tab", "aria-selected": String(E.tab === v), onclick: () => { E.tab = v; E.q = ""; if (v === "grades") markGradesSeen(); renderExpanded(); } }, l))),
         h("button", { class: "sp-icon sp-x-close", "aria-label": "Close", title: "Close (Esc)", onclick: closeExpanded }, svg("close", 16))),
       h("div", { class: "sp-x-tools" }, search, h("div", { class: "sp-x-chips" }, chips)),
       h("div", { class: "sp-x-body" }, body),
-      h("footer", { class: "sp-x-foot" }, `${count} item${count === 1 ? "" : "s"}`, h("button", { class: "sp-link", onclick: () => chrome.runtime.sendMessage({ type: "OPEN_PANEL" }) }, "Open StudyPilot →")));
+      h("footer", { class: "sp-x-foot" }, `${count} item${count === 1 ? "" : "s"}`, h("button", { class: "sp-link", onclick: () => chrome.runtime.sendMessage({ type: "OPEN_PANEL" }) }, "Open CampusPilot →")));
 
     const overlay = h("div", { id: "sp-expand", class: "sp-x", onclick: (e) => { if (e.target === overlay) closeExpanded(); } }, panel);
     document.body.append(overlay);
@@ -409,7 +409,7 @@
       if (!course) return;
       const open = course.assignments.filter((a) => a.due_at && !a.submitted && Date.parse(a.due_at) > Date.now() && Date.parse(a.due_at) < weekEnd);
       const graded = course.assignments.some((a) => a.graded) || (course.current_score ?? 0) > 0;
-      const chips = h("div", { class: "sp-chips", "aria-label": "StudyPilot summary" });
+      const chips = h("div", { class: "sp-chips", "aria-label": "CampusPilot summary" });
       if (showGrade && course.current_score != null && graded) {
         chips.append(h("span", { class: "sp-chip", title: "Current grade in Canvas" },
           h("span", { class: "sp-chip-dot", style: `background:${colorOf(id)}` }),

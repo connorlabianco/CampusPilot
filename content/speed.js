@@ -75,7 +75,7 @@
       input[type=number]{all:unset;width:42px;text-align:center;font:700 13px system-ui;background:rgba(255,255,255,.1);border-radius:6px;padding:3px 2px}
       input[type=range]{width:100px;accent-color:#7aa7ff;margin:0}
       .x{width:auto;padding:0 6px;font-size:11px}</style>
-      <div class="c" role="group" aria-label="StudyPilot video speed">
+      <div class="c" role="group" aria-label="CampusPilot video speed">
         <button class="dn" aria-label="Slower (S)" title="Slower (S)">&minus;</button>
         <input class="num" type="number" min="${MIN}" max="${MAX}" step="0.05" aria-label="Speed">
         <button class="up" aria-label="Faster (D)" title="Faster (D)">+</button>
